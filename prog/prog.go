@@ -68,6 +68,9 @@ type Call struct {
 	Ret     *ResultArg
 	Props   CallProps
 	Comment string
+
+	// instrumentation
+	Errno int32
 }
 
 func MakeCall(meta *Syscall, args []Arg) *Call {
@@ -614,4 +617,29 @@ func (props *CallProps) ForeachProp(f func(fieldName, key string, value reflect.
 		fieldType := typeObj.Field(i)
 		f(fieldType.Name, fieldType.Tag.Get("key"), fieldValue)
 	}
+}
+
+// Consume Code
+func (arg *ResultArg) InsertUse(insertUse *ResultArg) {
+	if arg.uses == nil {
+		arg.uses = make(map[*ResultArg]bool)
+	}
+	arg.uses[insertUse] = true
+}
+
+func (p *Prog) FindCallByName(name string) int {
+	for index, c := range p.Calls {
+		if name == c.Meta.Name {
+			return index
+		}
+	}
+	return -1
+}
+func (p *Prog) FindCallByNameError(call *Call) *Call {
+	for _, c := range p.Calls {
+		if call.Meta.Name == c.Meta.Name && c.Errno != 0 {
+			return c
+		}
+	}
+	return nil
 }

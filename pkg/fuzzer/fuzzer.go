@@ -142,6 +142,29 @@ func (fuzzer *Fuzzer) enqueue(executor queue.Executor, req *queue.Request, flags
 }
 
 func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags ProgFlags, attempt int) bool {
+
+	// Instrumentation
+	if res.Info != nil {
+		for i := range res.Info.Calls {
+			req.Prog.Calls[i].Errno = res.Info.Calls[i].Error
+			// CallExecuteCountMap catpture the call that syzkaller can not validly generate
+			isTriggerLLMGeneration := fuzzer.target.CallCorpus.UpdateCallExecuteCount(req.Prog.Calls[i].Meta.Name, req.Prog.Calls[i].Errno == 0)
+			if isTriggerLLMGeneration {
+				// GenerationCallOperator(req.Prog.Calls[i].Meta, fuzzer)
+			}
+		}
+		switch req.OperationType {
+		case LLMRepairModel:
+			if req.OperationCallIndex != -1 && res.Info.Calls[req.OperationCallIndex].Error == 0 {
+				fuzzer.statRecordLLMFixValid.Add(1)
+			}
+		case LLMGenerateModel:
+			if req.OperationCallIndex != -1 && res.Info.Calls[req.OperationCallIndex].Error == 0 {
+				fuzzer.statRecordLLMGenerationValid.Add(1)
+			}
+		}
+	}
+
 	// If we are already triaging this exact prog, this is flaky coverage.
 	// Hanged programs are harmful as they consume executor procs.
 	dontTriage := flags&progInTriage > 0 || res.Status == queue.Hanged

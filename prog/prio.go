@@ -323,3 +323,42 @@ func (ct *ChoiceTable) choose(r *rand.Rand, bias int) int {
 	}
 	return res
 }
+
+// Consume Code
+func (ct *ChoiceTable) choose_extension(r *rand.Rand, bias int) int {
+	if bias < 0 {
+		bias = ct.calls[r.Intn(len(ct.calls))].ID
+	}
+	if !ct.Generatable(bias) {
+		fmt.Printf("bias to disabled or non-generatable syscall %v\n", ct.target.Syscalls[bias].Name)
+		panic("disabled or non-generatable syscall")
+	}
+	run := ct.runs[bias]
+	runSum := int(run[len(run)-1])
+	x := int32(r.Intn(runSum) + 1)
+	res := sort.Search(len(run), func(i int) bool {
+		return run[i] >= x
+	})
+	if !ct.Generatable(res) {
+		panic("selected disabled or non-generatable syscall")
+	}
+	return res
+}
+
+func (ct *ChoiceTable) ChooseRelatedCalls(r *rand.Rand, callId int, number int) []*Syscall {
+	if !ct.Generatable(callId) {
+		return nil
+	}
+	selectMap := make(map[int]bool)
+	for i := 0; i < number; i++ {
+		idx := ct.choose_extension(r, callId)
+		selectMap[idx] = true
+	}
+	selectCalls := []*Syscall{}
+	for idx, _ := range selectMap {
+		if !ct.target.Syscalls[idx].Attrs.Disabled && !ct.target.Syscalls[idx].Attrs.NoGenerate {
+			selectCalls = append(selectCalls, ct.target.Syscalls[idx])
+		}
+	}
+	return selectCalls
+}

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"fmt"
 	"math/rand"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 	"github.com/google/syzkaller/pkg/cover"
 	"github.com/google/syzkaller/pkg/flatrpc"
 	"github.com/google/syzkaller/pkg/fuzzer/queue"
+	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/signal"
 	"github.com/google/syzkaller/prog"
 )
@@ -173,6 +175,19 @@ func (job *triageJob) handleCall(call int, info *triageCall) {
 			return
 		}
 	}
+
+	// Instrumentation
+	if job.flags&ProgFromCorpus == 1 || job.flags&ProgMinimized == 0 {
+		if call != -1 && p.Calls[call].Errno == 0 {
+			callName := p.Calls[call].Meta.Name
+			p.Target.CallCorpus.SaveValidProg(callName, p.Clone())
+		}
+		if call != -1 && p.Calls[call].Errno != 0 {
+			callName := p.Calls[call].Meta.Name
+			p.Target.CallCorpus.SaveInValidProg(callName, p.Clone())
+		}
+	}
+
 	callName := p.CallName(call)
 	if !job.fuzzer.Config.NewInputFilter(callName) {
 		return
@@ -207,6 +222,12 @@ func (job *triageJob) handleCall(call int, info *triageCall) {
 			})
 		}
 	}
+
+	// 1) trigger Repair Operator
+	if call != -1 && p.Calls[call].Errno != 0 {
+		repairCallOperator(p, len(p.Calls)-1, job.fuzzer)
+	}
+
 	job.fuzzer.Logf(2, "added new input for %v to the corpus: %s", callName, p)
 	input := corpus.NewInput{
 		Prog:     p,
@@ -600,4 +621,568 @@ func (sb *syncBuffer) Bytes() []byte {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
 	return sb.buf.Bytes()
+}
+
+// Consume Code
+func repairCallWithLLM(p *prog.Prog, call *prog.Call, fuzzer *Fuzzer, logRecord *prog.LogRecord) (bool, *prog.Prog) {
+	if call == nil {
+		return false, nil
+	}
+	if call.Meta.Attrs.Disabled || call.Meta.Attrs.NoGenerate {
+		return false, nil
+	}
+
+	// 1) remove the calls after call
+	target_index := -1
+	for index, c := range p.Calls {
+		if c == call {
+			target_index = index
+			break
+		}
+	}
+	// analyze/record result arg relation
+	p_record := p.Clone()
+	argCallMap := make(map[*prog.ResultArg]*prog.Call)
+	for i := 0; i <= target_index; i++ {
+		prog.ForeachArg(p_record.Calls[i], func(arg prog.Arg, ctx *prog.ArgCtx) {
+			if resultArg, ok := arg.(*prog.ResultArg); ok {
+				argCallMap[resultArg] = p_record.Calls[i]
+			}
+		})
+	}
+	analyzeResult := make(map[*prog.Call]string)
+	for i := target_index + 1; i < len(p_record.Calls); i++ {
+		analyzeCall := p_record.Calls[i]
+		prog.ForeachArg(analyzeCall, func(arg prog.Arg, ctx *prog.ArgCtx) {
+			if resultArg, ok_resultArg := arg.(*prog.ResultArg); ok_resultArg && resultArg.Res != nil {
+				if resCall, ok_res := argCallMap[resultArg.Res]; ok_res { //ref previous args
+					key := analyzeCall
+					value := resultArg.Type().Name() + "->" + resCall.Meta.Name + "->" + resultArg.Res.Type().Name()
+					analyzeResult[key] = value
+				}
+			}
+		})
+	}
+	for i := target_index; i >= 0; i-- {
+		p_record.RemoveCall(i)
+	}
+	for i := len(p.Calls) - 1; i > target_index; i-- {
+		p.RemoveCall(i)
+	}
+
+	// 2) generate prompt
+	pro_content_src := string(p.Serialize())
+	callName := call.Meta.Name
+	errorno := call.Errno
+	errorDefine := ""
+	errorContent := ""
+	if description, ok := prog.ErrornoDescriptionMap[errorno]; ok {
+		errorDefine = description[0]
+		errorContent = description[1]
+	}
+	logRecord.LogContent += fmt.Sprintf("(1) Extracted Program:\n%s\n", pro_content_src)
+
+	prompt_instructionStep := fmt.Sprintf(prog.PromptRepairInstructionAndStepsTemplate, callName, callName, errorno, errorDefine, errorContent, callName, callName, callName)
+
+	prompt_syzprogram := fmt.Sprintf("# Input\n1. **Syz Program**\n%s\n", pro_content_src)
+
+	prompt_execution_info := "2. **Execution Information of Each Sytem Call in the Syz Program**\n"
+	for _, c := range p.Calls {
+		cErrorNo := c.Errno
+		cErrorDefine := ""
+		cErrorContent := ""
+		if description, ok := prog.ErrornoDescriptionMap[cErrorNo]; ok {
+			cErrorDefine = description[0]
+			cErrorContent = description[1]
+		}
+		prompt_execution_info += fmt.Sprintf("%s returned an errno: %v (%s), which represents %s\n", c.Meta.Name, cErrorNo, cErrorDefine, cErrorContent)
+	}
+	prompt_execution_info += "\n"
+
+	prompt_description := "3. **Syzlang Description for Each System Call in the Syz Program**\n"
+	for _, c := range p.Calls {
+		specification := c.Meta.GenerateSyzlangSpecs()
+		prompt_description += specification + "\n"
+	}
+	prompt_description += "\n"
+	if strings.Contains(prompt_description, " ptr[") {
+		prompt_instructionStep += `		- Pointer parameters must be represented using a virtual address, and that address must point to specific content. For example, "buf ptr[out, buffer]" should generate something like &(0x7f0000000010)='./file1\x00' where 0x7f0000000010 represents virtual address, instead of directly './file1\x00'.
+	` + "\n"
+	} else {
+		prompt_instructionStep += "\n"
+	}
+
+	prompt_success_program := fmt.Sprintf("4. **Syz Program Examples from Previously Successful Execution for %s**\n", callName)
+	successful_programs := fuzzer.target.CallCorpus.GetValidProgs(callName)
+	if successful_programs == nil {
+		prompt_success_program += fmt.Sprintf("There is no Syz program from previously successful execution for %s.\n\n", callName)
+	} else { // Select up to three successful program
+		index := fuzzer.rnd.Intn(len(successful_programs))
+		prompt_success_program += fmt.Sprintf("%s\n", successful_programs[index].Serialize())
+	}
+
+	prompt_syntaxPrograms := "5. **Three Syntactically Correct Programs**\n"
+	candidatePrograms := []*prog.Prog{}
+	for range 10 {
+		candidateProgram := fuzzer.target.GenerateProgByMeta(call.Meta, fuzzer.ct)
+		candidatePrograms = append(candidatePrograms, candidateProgram)
+	}
+	sort.Slice(candidatePrograms, func(i, j int) bool {
+		return len(candidatePrograms[i].Calls) > len(candidatePrograms[j].Calls)
+	})
+	syntaxPrograms := []*prog.Prog{}
+	for _, syntaxProgram := range candidatePrograms {
+		syntaxProgram.Mutate(rand.New(rand.NewSource(rand.Int63())), prog.RecommendedCalls, fuzzer.ct, fuzzer.Config.NoMutateCalls, fuzzer.Config.Corpus.Programs())
+		if syntaxProgram.FindCallByName(callName) == -1 {
+			continue
+		}
+		syntaxPrograms = append(syntaxPrograms, syntaxProgram)
+		if len(syntaxPrograms) >= 3 {
+			break
+		}
+	}
+	if prog.Config_PocModel {
+		programCount := 1
+		progs := fuzzer.target.CallCorpus.GetCrashProgs(callName)
+		if progs != nil {
+			if len(progs) >= 3 {
+				for programCount < 4 {
+					prog := progs[rand.Intn(len(progs))]
+					prompt_syntaxPrograms += fmt.Sprintf("Program %v\n%s\n", programCount, prog.Serialize())
+					programCount++
+				}
+			} else {
+				for programCount < len(progs) {
+					prog := progs[programCount-1]
+					prompt_syntaxPrograms += fmt.Sprintf("Program %v\n%s\n", programCount, prog.Serialize())
+					programCount++
+
+				}
+			}
+		}
+		for programCount < 4 {
+			prompt_syntaxPrograms += fmt.Sprintf("Program %v\n%s\n", programCount, syntaxPrograms[programCount-1].Serialize())
+			programCount++
+		}
+	} else {
+		for i := range len(syntaxPrograms) {
+			prompt_syntaxPrograms += fmt.Sprintf("Program %v\n%s\n", i+1, syntaxPrograms[i].Serialize())
+		}
+	}
+
+	prompt_output := fmt.Sprintf(prog.PromptRepairOutputTemplate, callName)
+	prompt := prompt_instructionStep + prompt_syzprogram + prompt_execution_info + prompt_description + prompt_success_program + prompt_syntaxPrograms + prompt_output
+	if len(prompt) > 50000 {
+		return false, nil
+	}
+	logRecord.LogContent += fmt.Sprintf("(2) Generated Prompt:\n%s\n\n", prompt)
+
+	// 3) call llm model
+	messages := []Message{
+		// {Role: "system", Content: prompt_system},
+	}
+	fuzzer.statRecordLLMFix.Add(1)
+	responseBody := CallDeepseekAPI(prompt, messages)
+	testcase := extractTestcase(responseBody)
+	if len(testcase) <= 0 {
+		logRecord.LogContent += fmt.Sprintf("(3) LLM Repair Response:\n%s\n********************************************************\n\n", responseBody)
+		return false, nil
+	}
+	logRecord.LogContent += fmt.Sprintf("(3) LLM Repair Response:\n%s\n\n", responseBody)
+	p_fix, err := fuzzer.target.Deserialize([]byte(testcase), prog.NonStrict)
+	// messages_retry := []Message{
+	// 	// {Role: "system", Content: prompt_system},
+	// 	{Role: "user", Content: prompt},
+	// 	{Role: "assistant", Content: responseBody},
+	// }
+	// retry_count := 0
+	// for err != nil && retry_count < 1 {
+	// 	retry_count++
+	// 	prompt_retry := fmt.Sprintf("The fixed syz program has syntax error:%v\nPlease refix it and output the fixed syz program. Note that the syz program must be wrapped with ```, like this:\n```\nthe fixed syz program\n```\n", err)
+	// 	responseBody = CallDeepseekAPI(prompt_retry, messages_retry)
+	// 	testcase := extractTestcase(responseBody)
+	// 	if len(testcase) <= 0 {
+	// 		logRecord.LogContent += fmt.Sprintf("LLM Repair API Retry Failed:%s\n%s\n", prompt_retry, responseBody)
+	// 		continue
+	// 	}
+	// 	p_fix, err = fuzzer.target.Deserialize([]byte(testcase), prog.NonStrict)
+	// 	messages_retry = append(messages_retry, []Message{{Role: "user", Content: prompt_retry}, {Role: "assistant", Content: responseBody}}...)
+	// }
+
+	if err != nil {
+		logRecord.LogContent += fmt.Sprintf("(4) LLM Repair Failed as syntax error:%s\n Fixed test case:\n%s\n********************************************************\n\n", err, testcase)
+		if len(syntaxPrograms) != 0 {
+			for _, syntaxProgram := range syntaxPrograms {
+				go func() {
+					fuzzer.execute(fuzzer.smashQueue, &queue.Request{
+						Prog:     syntaxProgram,
+						ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
+						Stat:     fuzzer.statExecSmash,
+					})
+				}()
+			}
+		}
+		return false, nil
+	}
+	logRecord.LogContent += fmt.Sprintf("(4) LLM Repair Synatx Success: fixed test case:\n%s\n\n", testcase)
+
+	// append p_record
+	for referCall, referInfo := range analyzeResult {
+		infos := strings.Split(referInfo, "->")
+		referTypeName := infos[0]
+		candidateMetaName := infos[1]
+		candidateTypeName := infos[2]
+		for i := len(p_fix.Calls) - 1; i >= 0; i-- {
+			is_stop := false
+			candidateCall := p_fix.Calls[i]
+			if candidateCall.Meta.Name != candidateMetaName {
+				continue
+			}
+			prog.ForeachArg(candidateCall, func(candidateArg prog.Arg, candidateCtx *prog.ArgCtx) {
+				if candidateResultArg, ok_candidate := candidateArg.(*prog.ResultArg); ok_candidate && candidateResultArg.Type().Name() == candidateTypeName && candidateCtx.Field == nil {
+					prog.ForeachArg(referCall, func(referArg prog.Arg, referCtx *prog.ArgCtx) {
+						if referResultArg, ok_refer := referArg.(*prog.ResultArg); ok_refer && referResultArg.Type().Name() == referTypeName && referCtx.Field != nil {
+							is_stop = true
+							referResultArg.Res = candidateResultArg
+							candidateResultArg.InsertUse(referResultArg)
+							log.Logf(0, "has finding\n")
+						}
+					})
+
+				}
+			})
+
+			if is_stop {
+				break
+			}
+		}
+
+	}
+	p_fix.Calls = append(p_fix.Calls, p_record.Calls...)
+	logRecord.LogContent += fmt.Sprintf("(5) Merged program:\n%s\n\n", p_fix.Serialize())
+
+	// 4) execute
+	ids := []int{}
+	isNeedUpdate := false
+	for index, call := range p_fix.Calls {
+		needDelete := false
+		if call.Meta.Attrs.Disabled || call.Meta.Attrs.NoGenerate {
+			needDelete = true
+		}
+		if !fuzzer.ct.Generatable(call.Meta.ID) {
+			fuzzer.Config.EnabledCalls[call.Meta] = true
+			isNeedUpdate = true
+		}
+		if needDelete {
+			ids = append(ids, index)
+		}
+	}
+	for i := len(ids) - 1; i >= 0; i-- {
+		p_fix.RemoveCall(ids[i])
+	}
+	if isNeedUpdate {
+		fuzzer.updateChoiceTable(append(fuzzer.Config.Corpus.Programs(), p_fix))
+	}
+	if len(p_fix.Calls) <= 0 {
+		log.Logf(0, "len(p_fix.Calls) <= 0 ")
+		return false, nil
+	}
+	for len(p_fix.Calls) > prog.RecommendedCalls {
+		p_fix.RemoveCall(len(p_fix.Calls) - 1)
+	}
+
+	repairCallIndex := p_fix.FindCallByName(call.Meta.Name)
+	new_req := &queue.Request{
+		Prog:               p_fix.Clone(),
+		ExecOpts:           setFlags(flatrpc.ExecFlagCollectSignal),
+		Stat:               fuzzer.statRecordLLMFixGrammar,
+		OperationType:      LLMRepairModel,
+		OperationCallIndex: repairCallIndex,
+		Prompt:             prompt,
+	}
+	result := fuzzer.execute(fuzzer.candidateQueue, new_req)
+	if repairCallIndex == -1 || result == nil || result.Info == nil || result.Info.Calls == nil {
+		return false, nil
+	}
+	errno_description := ""
+	resultErrnoDescription := ""
+	if _, ok := prog.ErrornoDescriptionMap[errorno]; ok {
+		errno_description = prog.ErrornoDescriptionMap[errorno][1]
+	}
+	if _, ok := prog.ErrornoDescriptionMap[result.Info.Calls[repairCallIndex].Error]; ok {
+		resultErrnoDescription = prog.ErrornoDescriptionMap[result.Info.Calls[repairCallIndex].Error][1]
+	}
+
+	if result.Info.Calls[repairCallIndex].Error != 0 {
+		logRecord.LogContent += fmt.Sprintf("(6) Repair Program %s Execution Failed (errno:%v(%s)->%v(%s))\n********************************************************\n\n", call.Meta.Name, errorno, errno_description, result.Info.Calls[repairCallIndex].Error, resultErrnoDescription)
+		return false, nil
+	} else {
+		logRecord.LogContent += fmt.Sprintf("(6) LLM Repair %s Execution Success (errno:%v(%s))\n********************************************************\n\n", call.Meta.Name, errorno, resultErrnoDescription)
+		return true, p_fix
+	}
+}
+
+func repairCallOperator(p *prog.Prog, callIndex int, fuzzer *Fuzzer) {
+	go func() {
+		prog.RepairSem <- struct{}{}
+		defer func() { <-prog.RepairSem }()
+
+		p = p.Clone()
+		p_original := p.Clone()
+		logRecord := &prog.LogRecord{
+			LogContent: "",
+		}
+		logRecord.LogContent += fmt.Sprintf("=============Begain Repair Seed program=============\n%s\n", p_original.Serialize())
+		for index, originalCall := range p_original.Calls {
+			if index > callIndex {
+				break
+			}
+			if originalCall.Errno == 0 {
+				continue
+			}
+			p_candidate_llm := p.Clone()
+			repairCall := p_candidate_llm.FindCallByNameError(originalCall)
+			if repairCall == nil {
+				continue
+			}
+			logRecord.LogContent += fmt.Sprintf("##### Now repair call %v(%s)\n", index, originalCall.Meta.Name)
+			llm_result, p_fix := repairCallWithLLM(p_candidate_llm, repairCall, fuzzer, logRecord)
+			if llm_result {
+				p = p_fix
+			}
+		}
+		logRecord.LogContent += "=============End Repair Seed Program=============\n"
+		log.Logf(0, "%s\n", logRecord.LogContent)
+	}()
+}
+
+func GenerationCallOperator(metaCall *prog.Syscall, fuzzer *Fuzzer) {
+	if metaCall.Attrs.Disabled || metaCall.Attrs.NoGenerate {
+		return
+	}
+
+	go func() {
+		prog.GenerationSem <- struct{}{}
+		defer func() { <-prog.GenerationSem }()
+		logRecord := &prog.LogRecord{
+			LogContent: "",
+		}
+		logRecord.LogContent += fmt.Sprintf("=============Begin generate program for %s=============\n", metaCall.Name)
+		targetCallName := metaCall.Name
+		relatedSyscalls := fuzzer.ct.ChooseRelatedCalls(fuzzer.rand(), metaCall.ID, 10)
+
+		// 1) generate template
+		template_result := []string{}
+		if len(relatedSyscalls) == 0 {
+			template_result = append(template_result, targetCallName)
+		} else {
+			prompt_template_instruction := fmt.Sprintf(prog.PromptGenerationRelatedCallInstruction, targetCallName, targetCallName, targetCallName)
+
+			prompt_template_input := fmt.Sprintf("# The system calls related to %s\n", targetCallName)
+			for _, relatedSyscall := range relatedSyscalls {
+				prompt_template_input += relatedSyscall.Name + "\n"
+			}
+			prompt_template_input += "\n"
+			prompt_template_output := fmt.Sprintf("# Output\n1. Construct a system call sequence for %s following the instruction above, finally output the complete sequence in the following format:\n```\nsystem call1\nsystem call2\n...\n```\n", targetCallName)
+			prompt_template := prompt_template_instruction + prompt_template_input + prompt_template_output
+			logRecord.LogContent += fmt.Sprintf("(1) Template prompt\n%s\n", prompt_template)
+			// 1.1) call llm
+			messages := []Message{
+				// {Role: "system", Content: prompt_system},
+			}
+			responseBody := CallDeepseekAPI(prompt_template, messages)
+
+			template_result = extractCallSequence(responseBody, fuzzer.target.SyscallMap)
+			if len(template_result) <= 0 {
+				template_result = append(template_result, targetCallName)
+				logRecord.LogContent += fmt.Sprintf("(1.1) Template no response:\n%s\n", responseBody)
+			} else {
+				logRecord.LogContent += fmt.Sprintf("(1.1) Template sequence:\n%s\nResponse:\n%s\n", template_result, responseBody)
+			}
+		}
+
+		// 2) Instantiate the call sequence
+		generatePrograms := []string{}
+		for targetIndex, generateCallName := range template_result {
+			generateCallMeta := fuzzer.target.SyscallMap[generateCallName]
+			prompt_generate_instructionStep := ""
+			generated_callNames := ""
+			if len(generatePrograms) == 0 {
+				prompt_generate_instructionStep = fmt.Sprintf(prog.PromptGenerationInitInstructionSteps_NoSpecific, generateCallName, generateCallName, generateCallName, generateCallName)
+			} else {
+				for i := range targetIndex {
+					if i != targetIndex-1 {
+						generated_callNames += template_result[i] + ","
+					} else {
+						generated_callNames += template_result[i]
+					}
+				}
+				prompt_generate_instructionStep = fmt.Sprintf(prog.PromptGenerationInitInstructionSteps_HasSpecific, generated_callNames, generateCallName, generateCallName, generateCallName, generateCallName)
+			}
+
+			template_call_sequence := ""
+			for i := 0; i <= targetIndex; i++ {
+				template_call_sequence += template_result[i] + "\n"
+			}
+			prompt_generate_input := fmt.Sprintf("# Input\n**System Call Sequence Template**\n%s", template_call_sequence)
+			if len(generatePrograms) != 0 {
+				prompt_generate_input += fmt.Sprintf("**Specified Program to Instantiate %s**\n", generated_callNames)
+				for i := range len(generatePrograms) {
+					prompt_generate_input += fmt.Sprintf("- Instantiate %s system call with this program\n%s\n", template_result[i], generatePrograms[i])
+				}
+			}
+
+			prompt_generate_input += fmt.Sprintf("**System call description of %s**\n%s\n", generateCallName, generateCallMeta.GenerateSyzlangSpecs())
+			prompt_generate_input += "**Three Syntactically Correct Programs**\n"
+
+			candidatePrograms := []*prog.Prog{}
+			for range 10 {
+				candidateProgram := fuzzer.target.GenerateProgByMeta(generateCallMeta, fuzzer.ct)
+				candidatePrograms = append(candidatePrograms, candidateProgram)
+			}
+			sort.Slice(candidatePrograms, func(i, j int) bool {
+				return len(candidatePrograms[i].Calls) > len(candidatePrograms[j].Calls)
+			})
+			syntaxPrograms := []*prog.Prog{}
+			for _, syntaxProgram := range candidatePrograms {
+				syntaxProgram.Mutate(rand.New(rand.NewSource(rand.Int63())), prog.RecommendedCalls, fuzzer.ct, fuzzer.Config.NoMutateCalls, fuzzer.Config.Corpus.Programs())
+				if syntaxProgram.FindCallByName(generateCallName) == -1 {
+					continue
+				}
+				syntaxPrograms = append(syntaxPrograms, syntaxProgram)
+				if len(syntaxPrograms) >= 3 {
+					break
+				}
+			}
+			if prog.Config_PocModel {
+				programCount := 1
+				progs := fuzzer.target.CallCorpus.GetCrashProgs(generateCallName)
+				if progs != nil {
+					if len(progs) >= 3 {
+						for programCount < 4 {
+							prog := progs[rand.Intn(len(progs))]
+							prompt_generate_input += fmt.Sprintf("Program %v\n%s\n", programCount, prog.Serialize())
+							programCount++
+						}
+					} else {
+						for programCount < len(progs) {
+							prog := progs[programCount-1]
+							prompt_generate_input += fmt.Sprintf("Program %v\n%s\n", programCount, prog.Serialize())
+							programCount++
+
+						}
+					}
+				}
+				for programCount < 4 {
+					prompt_generate_input += fmt.Sprintf("Program %v\n%s\n", programCount, syntaxPrograms[programCount-1].Serialize())
+					programCount++
+				}
+			} else {
+				for i := range len(syntaxPrograms) {
+					prompt_generate_input += fmt.Sprintf("Program %v\n%s\n", i+1, syntaxPrograms[i].Serialize())
+				}
+			}
+
+			if strings.Contains(prompt_generate_instructionStep, " ptr[") {
+				prompt_generate_instructionStep += `		- Pointer parameters must be represented using a virtual address, and that address must point to specific content. For example, "buf ptr[out, buffer]" should generate something like &(0x7f0000000010)='./file1\x00' where 0x7f0000000010 represents virtual address, instead of directly './file1\x00'.
+		` + "\n"
+			} else {
+				prompt_generate_instructionStep += "\n"
+			}
+			prompt_generate_output := prog.PromptGenerationInitOutput
+			prompt_generate := prompt_generate_instructionStep + prompt_generate_input + prompt_generate_output
+			if len(prompt_generate) > 100000 {
+				p_example := fuzzer.target.GenerateProgByMeta(fuzzer.target.SyscallMap[generateCallName], fuzzer.ct)
+				generatePrograms = append(generatePrograms, string(p_example.Serialize()))
+				logRecord.LogContent += fmt.Sprintf("(2.1) Generate Skip as prompt size overlarge: %s\n", prompt_generate)
+				continue
+			}
+			logRecord.LogContent += fmt.Sprintf("(2) Generate prompt for call%v (%s)\n%s\n", targetIndex, generateCallName, prompt_generate)
+
+			// 2.1) call llm
+			messages := []Message{
+				// {Role: "system", Content: prompt_system},
+			}
+			fuzzer.statRecordLLMGeneration.Add(1)
+			responseBody := CallDeepseekAPI(prompt_generate, messages)
+			testcase := extractTestcase(responseBody)
+			if len(testcase) <= 0 {
+				p_example := fuzzer.target.GenerateProgByMeta(fuzzer.target.SyscallMap[generateCallName], fuzzer.ct)
+				generatePrograms = append(generatePrograms, string(p_example.Serialize()))
+				logRecord.LogContent += fmt.Sprintf("(2.1) Generate No Response: %s\n", responseBody)
+				continue
+			}
+			logRecord.LogContent += fmt.Sprintf("(2.1) Generate Response:\n%s\n", responseBody)
+			p_generate, err := fuzzer.target.Deserialize([]byte(testcase), prog.NonStrict)
+			if err != nil {
+				p_example := fuzzer.target.GenerateProgByMeta(fuzzer.target.SyscallMap[generateCallName], fuzzer.ct)
+				logRecord.LogContent += fmt.Sprintf("(2.2) Generate syntax failed: %s\nGenerated program:\n%s\n", err, testcase)
+				generatePrograms = append(generatePrograms, string(p_example.Serialize()))
+				if len(syntaxPrograms) != 0 {
+					for _, syntaxProgram := range syntaxPrograms {
+						go func() {
+							fuzzer.execute(fuzzer.smashQueue, &queue.Request{
+								Prog:     syntaxProgram,
+								ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
+								Stat:     fuzzer.statExecSmash,
+							})
+						}()
+					}
+				}
+			} else {
+				logRecord.LogContent += fmt.Sprintf("(2.2) Generate syntax success: generated program:\n%s\n", testcase)
+				generatePrograms = append(generatePrograms, string(p_generate.Serialize()))
+
+				ids := []int{}
+				isNeedUpdate := false
+				for index, call := range p_generate.Calls {
+					needDelete := false
+					if call.Meta.Attrs.Disabled || call.Meta.Attrs.NoGenerate {
+						needDelete = true
+					}
+					if !fuzzer.ct.Generatable(call.Meta.ID) {
+						fuzzer.Config.EnabledCalls[call.Meta] = true
+						isNeedUpdate = true
+					}
+					if needDelete {
+						ids = append(ids, index)
+					}
+				}
+				for i := len(ids) - 1; i >= 0; i-- {
+					p_generate.RemoveCall(ids[i])
+				}
+				if isNeedUpdate {
+					fuzzer.updateChoiceTable(append(fuzzer.Config.Corpus.Programs(), p_generate))
+				}
+				if len(p_generate.Calls) <= 0 {
+					log.Logf(0, "len(p_generate.Calls) <= 0 ")
+					continue
+				}
+
+				for len(p_generate.Calls) > prog.RecommendedCalls {
+					p_generate.RemoveCall(len(p_generate.Calls) - 1)
+				}
+
+				generateCallIndex := p_generate.FindCallByName(generateCallName)
+				new_req := &queue.Request{
+					Prog:               p_generate.Clone(),
+					ExecOpts:           setFlags(flatrpc.ExecFlagCollectSignal),
+					Stat:               fuzzer.statRecordLLMGenerationGrammar,
+					OperationType:      LLMGenerateModel,
+					OperationCallIndex: generateCallIndex,
+					Prompt:             prompt_generate,
+				}
+				result := fuzzer.execute(fuzzer.candidateQueue, new_req)
+				if generateCallIndex == -1 || result == nil || result.Info == nil || result.Info.Calls == nil {
+					continue
+				}
+				if result.Info.Calls[generateCallIndex].Error != 0 {
+					logRecord.LogContent += fmt.Sprintf("(2.3) Generate execute failed:%s(%v)\n", generateCallName, result.Info.Calls[generateCallIndex].Error)
+				} else {
+					logRecord.LogContent += fmt.Sprintf("(2.3) Generate execute success:%s\n", generateCallName)
+				}
+			}
+		}
+		log.Logf(0, "%s\n=============End=============\n", logRecord.LogContent)
+	}()
 }

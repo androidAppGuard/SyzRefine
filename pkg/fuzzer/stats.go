@@ -35,6 +35,15 @@ type Stats struct {
 	statExecCollide         *stat.Val
 	statCoverOverflows      *stat.Val
 	statCompsOverflows      *stat.Val
+
+	// Instrumentation
+	statRecordLLMFix        *stat.Val
+	statRecordLLMFixGrammar *stat.Val
+	statRecordLLMFixValid   *stat.Val
+
+	statRecordLLMGeneration        *stat.Val
+	statRecordLLMGenerationGrammar *stat.Val
+	statRecordLLMGenerationValid   *stat.Val
 }
 
 type SyscallStats struct {
@@ -86,5 +95,23 @@ func newStats(target *prog.Target) Stats {
 			stat.Rate{}, stat.NoGraph),
 		statCompsOverflows: stat.New("comps overflows", "Number of times the comparisons buffer overflowed",
 			stat.Rate{}, stat.NoGraph),
+
+		// Instrumentation
+		statRecordLLMFix: stat.New("record llm fix", "number of llm fix",
+			stat.Rate{}, stat.StackedGraph("record")),
+		statRecordLLMFixGrammar: stat.New("record llm fix grammar", "number of llm fix grammar valid",
+			stat.Rate{}, stat.StackedGraph("record")),
+		statRecordLLMFixValid: stat.New("record llm fix valid", "number of llm fix valid execution",
+			stat.Rate{}, stat.StackedGraph("record")),
+
+		statRecordLLMGeneration: stat.New("record llm generation", "number of llm generation",
+			stat.Rate{}, stat.StackedGraph("record")),
+		statRecordLLMGenerationGrammar: stat.New("record llm generation grammar", "number of llm generation grammar valid",
+			stat.Rate{}, stat.StackedGraph("record")),
+		statRecordLLMGenerationValid: stat.New("record llm generation valid", "number of llm generation valid execution",
+			stat.Rate{}, stat.StackedGraph("record")),
 	}
 }
+
+var LLMRepairModel int = 1
+var LLMGenerateModel int = 2

@@ -81,6 +81,9 @@ type Target struct {
 	// The default ChoiceTable is used only by tests and utilities, so we initialize it lazily.
 	defaultOnce        sync.Once
 	defaultChoiceTable *ChoiceTable
+
+	// Instrumentation
+	CallCorpus *CallCorpus
 }
 
 const maxSpecialPointers = 16

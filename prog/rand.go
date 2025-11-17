@@ -1044,3 +1044,18 @@ func getCompatibleResources(p *Prog, resourceType string, r *randGen) (resources
 	}
 	return resources
 }
+
+// Consume Code
+func (target *Target) GenerateProgByMeta(meta *Syscall, ct *ChoiceTable) *Prog {
+	p := &Prog{
+		Target: target,
+	}
+	r := newRand(target, rand.NewSource(rand.Int63()))
+	s := newState(target, ct, nil)
+	calls := r.generateParticularCall(s, meta)
+	p.Calls = append(p.Calls, calls...)
+	if err := p.validate(); err != nil {
+		panic(err)
+	}
+	return p
+}

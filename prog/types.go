@@ -986,3 +986,19 @@ func CppName(name string) string {
 	}
 	return string(res)
 }
+
+// Consume Code
+func (s *Syscall) GenerateSyzlangSpecs() string {
+	specs := fmt.Sprintf("%s(", s.Name)
+	var args []string
+	for _, arg := range s.Args {
+		name := arg.Name
+		str := arg.Type.String()
+		args = append(args, fmt.Sprintf("%s %s", name, str))
+	}
+	specs += strings.Join(args, ", ") + ")"
+	if s.Ret != nil {
+		specs += fmt.Sprintf(" -> %s", s.Ret.String())
+	}
+	return specs
+}

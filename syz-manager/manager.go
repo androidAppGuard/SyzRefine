@@ -1188,6 +1188,47 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			},
 			ModeKFuzzTest: mgr.cfg.Experimental.EnableKFuzzTest,
 		}, rnd, mgr.target)
+
+		// Instrumentation
+		mgr.target.CallCorpus = &prog.CallCorpus{
+			ValidProgsMap:       make(map[string][]*prog.Prog),
+			InvalidProgsMap:     make(map[string][]*prog.Prog),
+			CrashProgsMap:       make(map[string][]*prog.Prog),
+			CallExecuteCountMap: make(map[string]*prog.CallCount),
+		}
+		done := make(chan bool)
+		minute := 0
+		go func() {
+			ticker := time.NewTicker(300 * time.Minute)
+			defer ticker.Stop()
+			log.Logf(0, "NewTicker run")
+			for {
+				select {
+				case <-done:
+					log.Logf(0, "NewTicker end")
+					return
+				case <-ticker.C:
+					minute++
+					generationCount := 0
+					for enableCall := range enabledSyscalls {
+						if enableCall.Attrs.Disabled || enableCall.Attrs.NoGenerate {
+							continue
+						}
+						if _, ok := mgr.target.CallCorpus.ValidProgsMap[enableCall.Name]; !ok {
+							if mgr.target.CallCorpus.GetCallExecuteLLMGenerationCount(enableCall.Name) < prog.ThresholdMaxLLMGeneration {
+								// fuzzer.GenerationCallOperator(enableCall, fuzzerObj)
+								mgr.target.CallCorpus.UpdateCallExecuteLLMGenerationCount(enableCall.Name)
+								generationCount++
+							}
+						}
+					}
+					log.Logf(0, "At %v minites, send %v GenerationCallOperator\n", minute*300, generationCount)
+				}
+			}
+		}()
+		mgr.target.CallCorpus.LoadCrashProgs("/data1/stu_Guoh/phd2/script/corpus/crashprograms", mgr.target)
+		log.Logf(0, "fuzzerObj.Config.EnabledCalls count:%v\n", len(fuzzerObj.Config.EnabledCalls))
+
 		fuzzerObj.AddCandidates(candidates)
 		mgr.fuzzer.Store(fuzzerObj)
 		mgr.http.Fuzzer.Store(fuzzerObj)

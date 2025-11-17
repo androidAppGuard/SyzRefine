@@ -57,6 +57,11 @@ type Request struct {
 	mu     sync.Mutex
 	result *Result
 	done   chan struct{}
+
+	// Consume Code
+	OperationType      int
+	OperationCallIndex int
+	Prompt             string
 }
 
 type ExecutorID struct {
