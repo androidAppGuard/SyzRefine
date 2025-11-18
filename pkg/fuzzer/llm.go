@@ -13,12 +13,9 @@ import (
 )
 
 const (
-	// apiURL   = "https://api.deepseek.com/chat/completions"
-	// apiToken = "sk-726a62dc006641fe92b3cb8dd98de02c"
 
-	apiURL = "https://api.chatanywhere.tech/v1/chat/completions"
-	// apiToken = "sk-9OZOWoWKKqyDN8aJsJkUfczVJ8UecWt6rrNfvHHsesOMck4s"
-	apiToken = "sk-r3flfmnRvgTBtjzWbDCF59J52kbQqGdGt3KO5GwCdjOh6NcH"
+	apiURL = "fill your apiUrl"
+	apiToken = "fill your api token"
 )
 
 type ChatRequest struct {
