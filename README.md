@@ -1,44 +1,89 @@
-# syzkaller - kernel fuzzer
+# SyzRefine: Enhancing Kernel Fuzzing via LLM-powered Program Generation
 
-[![CI Status](https://github.com/google/syzkaller/workflows/ci/badge.svg)](https://github.com/google/syzkaller/actions?query=workflow/ci)
-[![OSS-Fuzz](https://oss-fuzz-build-logs.storage.googleapis.com/badges/syzkaller.svg)](https://bugs.chromium.org/p/oss-fuzz/issues/list?q=label:Proj-syzkaller)
-[![Go Report Card](https://goreportcard.com/badge/github.com/google/syzkaller)](https://goreportcard.com/report/github.com/google/syzkaller)
-[![Coverage Status](https://codecov.io/gh/google/syzkaller/graph/badge.svg)](https://codecov.io/gh/google/syzkaller)
-[![GoDoc](https://godoc.org/github.com/google/syzkaller?status.svg)](https://godoc.org/github.com/google/syzkaller)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+## Main Components
 
-`syzkaller` (`[siːzˈkɔːlə]`) is an unsupervised coverage-guided kernel fuzzer.\
-Supported OSes: `FreeBSD`, `Fuchsia`, `gVisor`, `Linux`, `NetBSD`, `OpenBSD`, `Windows`.
+1. Target Syscall Identification 
+1. LM-powered Program Generation 
 
-Mailing list: [syzkaller@googlegroups.com](https://groups.google.com/forum/#!forum/syzkaller) (join on [web](https://groups.google.com/forum/#!forum/syzkaller) or by [email](mailto:syzkaller+subscribe@googlegroups.com)).
+## Setup
+1. Dependencies
+    ```
+    sudo apt-get update
+    sudo apt-get install -y make git gcc flex bison libelf-dev libssl-dev bc qemu-system-x86 build-essential debootstrap
+    ```
 
-Found bugs: [Darwin/XNU](docs/darwin/README.md), [FreeBSD](docs/freebsd/found_bugs.md), [Linux](docs/linux/found_bugs.md), [NetBSD](docs/netbsd/found_bugs.md), [OpenBSD](docs/openbsd/found_bugs.md), [Windows](docs/windows/README.md).
+2. Install Go language support before compiling SyzMini.
 
-## Documentation
+    ```
+    wget https://dl.google.com/go/go1.22.1.linux-amd64.tar.gz
+    tar -xf go1.22.1.linux-amd64.tar.gz
+    export GOROOT=`pwd`/go
+    export PATH=$GOROOT/bin:$PATH
+    ``` 
 
-Initially, syzkaller was developed with Linux kernel fuzzing in mind, but now
-it's being extended to support other OS kernels as well.
-Most of the documentation at this moment is related to the [Linux](docs/linux/setup.md) kernel.
-For other OS kernels check:
-[Darwin/XNU](docs/darwin/README.md),
-[FreeBSD](docs/freebsd/README.md),
-[Fuchsia](docs/fuchsia/README.md),
-[NetBSD](docs/netbsd/README.md),
-[OpenBSD](docs/openbsd/setup.md),
-[Starnix](docs/starnix/README.md),
-[Windows](docs/windows/README.md),
-[gVisor](docs/gvisor/README.md).
-[Akaros](docs/akaros/README.md),
+3. Also, SyzRefine requires [**KVM**](https://help.ubuntu.com/community/KVM/Installation)  enabled.
 
-- [How to install syzkaller](docs/setup.md)
-- [How to use syzkaller](docs/usage.md)
-- [How syzkaller works](docs/internals.md)
-- [How to install syzbot](docs/setup_syzbot.md)
-- [How to contribute to syzkaller](docs/contributing.md)
-- [How to report Linux kernel bugs](docs/linux/reporting_kernel_bugs.md)
-- [Tech talks and articles](docs/talks.md)
-- [Research work based on syzkaller](docs/research.md)
+4. Build kernel (taking v5.15 as example)
 
-## Disclaimer
+    ``` 
+    **  Checkout Linux Kernel source
+    git clone https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+    cd linux
+    git checkout v5.15
 
-This is not an official Google product.
+    ** Generate default configs
+    make defconfig
+
+    **  Enable required config options
+    # Coverage collection.
+    CONFIG_KCOV=y
+    # Debug info for symbolization.
+    CONFIG_DEBUG_INFO_DWARF4=y
+    # Memory bug detector
+    CONFIG_KASAN=y
+    CONFIG_KASAN_INLINE=y
+    # Required for Debian Stretch and later
+    CONFIG_CONFIGFS_FS=y
+    CONFIG_SECURITYFS=y
+
+    ** make olddefconfig
+
+    ** Build the Kernel
+    make -j`nproc`
+    ``` 
+
+5. Image
+
+    ``` 
+    ** Install debootstrap
+    sudo apt install debootstrap
+
+    ** Create Debian Bullseye Linux image
+    mkdir image
+    cd image/
+    wget https://raw.githubusercontent.com/google/syzkaller/master/tools/create-image.sh -O create-image.sh
+    chmod +x create-image.sh
+    ./create-image.sh
+    ``` 
+
+6. Build SyzRefine
+
+    ```
+    ** Clone SyzMini and compile the fuzzer. Make sure Go is installed.
+    cd SyzRefine
+    make
+    ```
+
+7. Run SyzRefine (take v515 as example)
+
+    ```
+    cd SyzRefine/bin 
+    ./syz-manager -config your.cfg -llm_url llm_api_url -llm_mode llm_model_name -llm_token llm_token 
+    ```
+
+    The `syz-manager` process will wind up VMs and start fuzzing in them.
+    The `-config` command line option gives the location of the configuration file, which is described [here](configuration.md).
+    The `-llm_url` represents base_url to api address or local hosted LLM.
+    The `-llm_model_name` represents model name, used with third party api or local LLM.
+    The `-llm_token` represents api_key for third party api service.
+    Found crashes, statistics and other information is exposed on the HTTP address specified in the manager config.
