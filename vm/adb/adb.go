@@ -7,7 +7,6 @@ package adb
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -129,7 +128,7 @@ func (pool *Pool) Count() int {
 	return len(pool.cfg.Devices)
 }
 
-func (pool *Pool) Create(_ context.Context, workdir string, index int) (vmimpl.Instance, error) {
+func (pool *Pool) Create(workdir string, index int) (vmimpl.Instance, error) {
 	device, err := loadDevice(pool.cfg.Devices[index])
 	if err != nil {
 		return nil, err
@@ -157,15 +156,7 @@ func (pool *Pool) Create(_ context.Context, workdir string, index int) (vmimpl.I
 		log.Logf(0, "associating adb device %v with console cmd `%v`", inst.device, inst.consoleCmd)
 	} else {
 		if inst.console == "" {
-			// More verbose log level is required, otherwise echo to /dev/kmsg won't show.
-			level, err := inst.adb("shell", "cat /proc/sys/kernel/printk")
-			if err != nil {
-				return nil, fmt.Errorf("failed to read /proc/sys/kernel/printk: %w", err)
-			}
-			inst.adb("shell", "echo 8 > /proc/sys/kernel/printk")
 			inst.console = findConsole(inst.adbBin, inst.device)
-			// Verbose kmsg slows down system, so disable it after findConsole.
-			inst.adb("shell", fmt.Sprintf("echo %v > /proc/sys/kernel/printk", string(level)))
 		}
 		log.Logf(0, "associating adb device %v with console %v", inst.device, inst.console)
 	}
@@ -425,7 +416,13 @@ func (inst *instance) repair() error {
 
 func (inst *instance) runScript(script string) error {
 	log.Logf(2, "adb: executing %s", script)
-	output, err := osutil.RunCmd(5*time.Minute, "", "sh", script, inst.device, inst.console)
+	// Execute the contents of the script.
+	contents, err := os.ReadFile(script)
+	if err != nil {
+		return fmt.Errorf("unable to read %s: %w", script, err)
+	}
+	c := string(contents)
+	output, err := osutil.RunCmd(5*time.Minute, "", "sh", "-c", c)
 	if err != nil {
 		return fmt.Errorf("failed to execute %s: %w", script, err)
 	}
@@ -522,7 +519,7 @@ func isRemoteCuttlefish(dev string) (bool, string) {
 	return true, ip
 }
 
-func (inst *instance) Run(ctx context.Context, command string) (
+func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command string) (
 	<-chan []byte, <-chan error, error) {
 	var tty io.ReadCloser
 	var err error
@@ -567,8 +564,9 @@ func (inst *instance) Run(ctx context.Context, command string) (
 	merger.Add("console", tty)
 	merger.Add("adb", adbRpipe)
 
-	return vmimpl.Multiplex(ctx, adb, merger, vmimpl.MultiplexConfig{
+	return vmimpl.Multiplex(adb, merger, timeout, vmimpl.MultiplexConfig{
 		Console: tty,
+		Stop:    stop,
 		Close:   inst.closed,
 		Debug:   inst.debug,
 		Scale:   inst.timeouts.Scale,

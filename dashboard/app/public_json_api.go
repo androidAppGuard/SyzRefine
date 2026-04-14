@@ -178,7 +178,7 @@ func GetJSONDescrFor(page interface{}) ([]byte, error) {
 	return json.MarshalIndent(res, "", "\t")
 }
 
-func writeExtAPICoverageFor(ctx context.Context, w io.Writer, ns, repo string, p *coverageHeatmapParams) error {
+func writeExtAPICoverageFor(ctx context.Context, w io.Writer, ns, repo string) error {
 	// By default, return the previous month coverage. It guarantees the good numbers.
 	//
 	// The alternative is to return the current month.
@@ -187,25 +187,13 @@ func writeExtAPICoverageFor(ctx context.Context, w io.Writer, ns, repo string, p
 	if err != nil {
 		return fmt.Errorf("coveragedb.GenNPeriodsTill: %w", err)
 	}
-
-	covDBClient := getCoverageDBClient(ctx)
-	ff, err := coveragedb.MakeFuncFinder(ctx, covDBClient, ns, tps[0])
+	defaultTimePeriod := tps[0]
+	covDBClient := GetCoverageDBClient(ctx)
+	ff, err := coveragedb.MakeFuncFinder(ctx, covDBClient, ns, defaultTimePeriod)
 	if err != nil {
 		return fmt.Errorf("coveragedb.MakeFuncFinder: %w", err)
 	}
-	subsystem := ""
-	manager := ""
-	if p != nil {
-		subsystem = p.subsystem
-		manager = p.manager
-	}
-	covCh, errCh := coveragedb.FilesCoverageStream(ctx, covDBClient,
-		&coveragedb.SelectScope{
-			Ns:        ns,
-			Subsystem: subsystem,
-			Manager:   manager,
-			Periods:   tps,
-		})
+	covCh, errCh := coveragedb.FilesCoverageStream(ctx, covDBClient, ns, defaultTimePeriod)
 	if err := writeFileCoverage(ctx, w, repo, ff, covCh); err != nil {
 		return fmt.Errorf("populateFileCoverage: %w", err)
 	}
@@ -244,29 +232,42 @@ func writeFileCoverage(ctx context.Context, w io.Writer, repo string, ff *covera
 }
 
 func genFuncsCov(fc *coveragedb.FileCoverageWithLineInfo, ff *coveragedb.FunctionFinder,
-) ([]*cover.FuncCoverage, error) {
-	nameToLines := map[string][]*cover.Block{}
+) ([]*cover.FunctionCoverage, error) {
+	nameToLines := map[string][]int{}
+	funcInstrumented := map[string]int{}
 	for i, hitCount := range fc.HitCounts {
 		lineNum := int(fc.LinesInstrumented[i])
 		funcName, err := ff.FileLineToFuncName(fc.Filepath, lineNum)
 		if err != nil {
 			return nil, fmt.Errorf("ff.FileLineToFuncName: %w", err)
 		}
-		nameToLines[funcName] = append(nameToLines[funcName], &cover.Block{
-			HitCount: int(hitCount),
+		funcInstrumented[funcName]++
+		if hitCount == 0 {
+			continue
+		}
+		nameToLines[funcName] = append(nameToLines[funcName], lineNum)
+	}
+
+	var res []*cover.FunctionCoverage
+	for funcName, lines := range nameToLines {
+		res = append(res, &cover.FunctionCoverage{
+			FuncName:     funcName,
+			Instrumented: funcInstrumented[funcName],
+			Blocks:       linesToBlocks(lines),
+		})
+	}
+	return res, nil
+}
+
+func linesToBlocks(lines []int) []*cover.CoveredBlock {
+	var res []*cover.CoveredBlock
+	for _, lineNum := range lines {
+		res = append(res, &cover.CoveredBlock{
 			FromLine: lineNum,
 			FromCol:  0,
 			ToLine:   lineNum,
 			ToCol:    -1,
 		})
 	}
-
-	var res []*cover.FuncCoverage
-	for funcName, blocks := range nameToLines {
-		res = append(res, &cover.FuncCoverage{
-			FuncName: funcName,
-			Blocks:   blocks,
-		})
-	}
-	return res, nil
+	return res
 }

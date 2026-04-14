@@ -30,9 +30,8 @@ type Email struct {
 	Author      string
 	OwnEmail    bool
 	Cc          []string
-	RawCc       []string // unstripped emails
-	Body        string   // text/plain part
-	Patch       string   // attached patch, if any
+	Body        string // text/plain part
+	Patch       string // attached patch, if any
 	Commands    []*SingleCommand
 }
 
@@ -60,8 +59,6 @@ const (
 
 	cmdTest5
 )
-
-const ForwardedPrefix = "Forwarded: "
 
 var groupsLinkRe = regexp.MustCompile(`(?m)\nTo view this discussion (?:on the web )?visit` +
 	` (https://groups\.google\.com/.*?)\.(:?$|\n|\r)`)
@@ -137,7 +134,7 @@ func Parse(r io.Reader, ownEmails, goodLists, domains []string) (*Email, error) 
 		return nil, err
 	}
 	bodyStr := string(body)
-	subject := decodeSubject(msg.Header.Get("Subject"))
+	subject := msg.Header.Get("Subject")
 	var cmds []*SingleCommand
 	var patch string
 	if !fromMe {
@@ -179,7 +176,7 @@ func Parse(r io.Reader, ownEmails, goodLists, domains []string) (*Email, error) 
 	}
 	date, _ := mail.ParseDate(msg.Header.Get("Date"))
 	email := &Email{
-		BugIDs:      unique(bugIDs),
+		BugIDs:      dedupBugIDs(bugIDs),
 		MessageID:   msg.Header.Get("Message-ID"),
 		InReplyTo:   extractInReplyTo(msg.Header),
 		Date:        date,
@@ -189,7 +186,6 @@ func Parse(r io.Reader, ownEmails, goodLists, domains []string) (*Email, error) 
 		MailingList: mailingList,
 		Subject:     subject,
 		Cc:          ccList,
-		RawCc:       mergeRawAddresses(from, originalFroms, to, cc),
 		Body:        bodyStr,
 		Patch:       patch,
 		Commands:    cmds,
@@ -208,11 +204,7 @@ func AddAddrContext(email, context string) (string, error) {
 	if at == -1 {
 		return "", fmt.Errorf("failed to parse %q as email: no @", email)
 	}
-	result := addr.Address[:at]
-	if context != "" {
-		result += "+" + context
-	}
-	result += addr.Address[at:]
+	result := addr.Address[:at] + "+" + context + addr.Address[at:]
 	if addr.Name != "" {
 		addr.Address = result
 		result = addr.String()
@@ -368,9 +360,9 @@ func extractArgsTokens(body string, num int) string {
 		if lineEnd == -1 {
 			lineEnd = len(body) - pos
 		}
-		line := strings.TrimSpace(strings.ReplaceAll(body[pos:pos+lineEnd], "\t", " "))
+		line := strings.TrimSpace(strings.Replace(body[pos:pos+lineEnd], "\t", " ", -1))
 		for {
-			line1 := strings.ReplaceAll(line, "  ", " ")
+			line1 := strings.Replace(line, "  ", " ", -1)
 			if line == line1 {
 				break
 			}
@@ -502,8 +494,8 @@ func extractBodyBugIDs(body string, ownEmailMap map[string]bool, domains []strin
 	return ids
 }
 
-func unique(list []string) []string {
-	// We preserve the original order since it's necessary for bug IDs.
+func dedupBugIDs(list []string) []string {
+	// We should preserve the original order of IDs.
 	var ret []string
 	dup := map[string]struct{}{}
 	for _, v := range list {
@@ -543,18 +535,6 @@ func MergeEmailLists(lists ...[]string) []string {
 	return result
 }
 
-func mergeRawAddresses(lists ...[]*mail.Address) []string {
-	var emails []string
-	for _, list := range lists {
-		for _, item := range list {
-			emails = append(emails, item.Address)
-		}
-	}
-	emails = unique(emails)
-	sort.Strings(emails)
-	return emails
-}
-
 func RemoveFromEmailList(list []string, toRemove string) []string {
 	var result []string
 	toRemove = CanonicalEmail(toRemove)
@@ -564,14 +544,4 @@ func RemoveFromEmailList(list []string, toRemove string) []string {
 		}
 	}
 	return result
-}
-
-// Decode RFC 2047-encoded subjects.
-func decodeSubject(rawSubject string) string {
-	decoder := new(mime.WordDecoder)
-	decodedSubject, err := decoder.DecodeHeader(rawSubject)
-	if err != nil {
-		return rawSubject
-	}
-	return decodedSubject
 }

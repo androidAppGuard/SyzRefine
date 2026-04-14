@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"cloud.google.com/go/spanner"
+	"google.golang.org/api/iterator"
 )
 
 type SessionTestRepository struct {
@@ -19,35 +20,32 @@ func NewSessionTestRepository(client *spanner.Client) *SessionTestRepository {
 	}
 }
 
-// If the beforeSave callback is specified, it will be called before saving the entity.
-func (repo *SessionTestRepository) InsertOrUpdate(ctx context.Context, test *SessionTest,
-	beforeSave func(*SessionTest)) error {
+func (repo *SessionTestRepository) InsertOrUpdate(ctx context.Context, test *SessionTest) error {
 	_, err := repo.client.ReadWriteTransaction(ctx,
 		func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
 			// Check if the test already exists.
-			dbTest, err := readEntity[SessionTest](ctx, txn, spanner.Statement{
+			stmt := spanner.Statement{
 				SQL: "SELECT * from `SessionTests` WHERE `SessionID`=@sessionID AND `TestName` = @testName",
 				Params: map[string]interface{}{
 					"sessionID": test.SessionID,
 					"testName":  test.TestName,
 				},
-			})
+			}
+			iter := txn.Query(ctx, stmt)
+			defer iter.Stop()
+
 			var stmts []*spanner.Mutation
-			if err != nil {
-				return err
-			} else if dbTest != nil {
-				if beforeSave != nil {
-					beforeSave(test)
-				}
+
+			_, iterErr := iter.Next()
+			if iterErr == nil {
 				m, err := spanner.UpdateStruct("SessionTests", test)
 				if err != nil {
 					return err
 				}
 				stmts = append(stmts, m)
+			} else if iterErr != iterator.Done {
+				return iterErr
 			} else {
-				if beforeSave != nil {
-					beforeSave(test)
-				}
 				m, err := spanner.InsertStruct("SessionTests", test)
 				if err != nil {
 					return err
@@ -60,13 +58,16 @@ func (repo *SessionTestRepository) InsertOrUpdate(ctx context.Context, test *Ses
 }
 
 func (repo *SessionTestRepository) Get(ctx context.Context, sessionID, testName string) (*SessionTest, error) {
-	return readEntity[SessionTest](ctx, repo.client.Single(), spanner.Statement{
+	stmt := spanner.Statement{
 		SQL: "SELECT * FROM `SessionTests` WHERE `SessionID` = @session AND `TestName` = @name",
 		Params: map[string]interface{}{
 			"session": sessionID,
 			"name":    testName,
 		},
-	})
+	}
+	iter := repo.client.Single().Query(ctx, stmt)
+	defer iter.Stop()
+	return readOne[SessionTest](iter)
 }
 
 type FullSessionTest struct {
@@ -76,7 +77,14 @@ type FullSessionTest struct {
 }
 
 func (repo *SessionTestRepository) BySession(ctx context.Context, sessionID string) ([]*FullSessionTest, error) {
-	list, err := repo.BySessionRaw(ctx, sessionID)
+	stmt := spanner.Statement{
+		SQL: "SELECT * FROM `SessionTests` WHERE `SessionID` = @session" +
+			" ORDER BY `UpdatedAt`",
+		Params: map[string]interface{}{"session": sessionID},
+	}
+	iter := repo.client.Single().Query(ctx, stmt)
+	defer iter.Stop()
+	list, err := readEntities[SessionTest](iter)
 	if err != nil {
 		return nil, err
 	}
@@ -97,10 +105,13 @@ func (repo *SessionTestRepository) BySession(ctx context.Context, sessionID stri
 		for key := range needBuilds {
 			keys = append(keys, key)
 		}
-		builds, err := readEntities[Build](ctx, repo.client.Single(), spanner.Statement{
+		stmt := spanner.Statement{
 			SQL:    "SELECT * FROM `Builds` WHERE `ID` IN UNNEST(@ids)",
 			Params: map[string]interface{}{"ids": keys},
-		})
+		}
+		iter := repo.client.Single().Query(ctx, stmt)
+		defer iter.Stop()
+		builds, err := readEntities[Build](iter)
 		if err != nil {
 			return nil, err
 		}
@@ -111,12 +122,4 @@ func (repo *SessionTestRepository) BySession(ctx context.Context, sessionID stri
 		}
 	}
 	return ret, nil
-}
-
-func (repo *SessionTestRepository) BySessionRaw(ctx context.Context, sessionID string) ([]*SessionTest, error) {
-	return readEntities[SessionTest](ctx, repo.client.Single(), spanner.Statement{
-		SQL: "SELECT * FROM `SessionTests` WHERE `SessionID` = @session" +
-			" ORDER BY `UpdatedAt`",
-		Params: map[string]interface{}{"session": sessionID},
-	})
 }

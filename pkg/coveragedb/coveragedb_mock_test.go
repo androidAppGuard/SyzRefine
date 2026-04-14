@@ -4,6 +4,7 @@
 package coveragedb
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"strings"
@@ -12,15 +13,22 @@ import (
 
 	"cloud.google.com/go/spanner"
 	"github.com/google/syzkaller/pkg/coveragedb/mocks"
+	"github.com/google/syzkaller/pkg/subsystem"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
+
+//go:generate ../../tools/mockery.sh --name SpannerClient -r
+//go:generate ../../tools/mockery.sh --name ReadOnlyTransaction -r
+//go:generate ../../tools/mockery.sh --name RowIterator -r
+//go:generate ../../tools/mockery.sh --name Row -r
 
 type spannerMockTune func(*testing.T, *mocks.SpannerClient)
 
 func TestSaveMergeResult(t *testing.T) {
 	tests := []struct {
 		name     string
+		sss      []*subsystem.Subsystem
 		jsonl    io.Reader
 		descr    *HistoryRecord
 		mockTune spannerMockTune
@@ -42,7 +50,7 @@ func TestSaveMergeResult(t *testing.T) {
 			name:     "1 MCR record, Ok",
 			jsonl:    strings.NewReader(`{"MCR":{"FileData":{}}}`),
 			descr:    &HistoryRecord{},
-			wantRows: 2, // 1 in files and 1 in merge_history
+			wantRows: 3, // 1 in files, 1 in file_subsystems and 1 in merge_history
 			mockTune: func(t *testing.T, m *mocks.SpannerClient) {
 				m.
 					On("Apply", mock.Anything, mock.Anything).
@@ -68,14 +76,14 @@ func TestSaveMergeResult(t *testing.T) {
 			jsonl: strings.NewReader(`	{"MCR":{"FileData":{}}}
 																		{"MCR":{"FileData":{}}}`),
 			descr:    &HistoryRecord{},
-			wantRows: 3,
+			wantRows: 5,
 			mockTune: func(t *testing.T, m *mocks.SpannerClient) {
 				m.
 					On("Apply",
 						mock.Anything,
 						mock.MatchedBy(func(ms []*spanner.Mutation) bool {
-							// 2 in files and 1 in merge_history
-							return len(ms) == 3
+							// 2 in files, 2 in file_subsystems and 1 in merge_history
+							return len(ms) == 5
 						})).
 					Return(time.Now(), nil).
 					Once()
@@ -85,17 +93,17 @@ func TestSaveMergeResult(t *testing.T) {
 			name:     "2k records, Ok",
 			jsonl:    strings.NewReader(strings.Repeat("{\"MCR\":{\"FileData\":{}}}\n", 2000)),
 			descr:    &HistoryRecord{},
-			wantRows: 2001,
+			wantRows: 4001,
 			mockTune: func(t *testing.T, m *mocks.SpannerClient) {
 				m.
 					On("Apply",
 						mock.Anything,
 						mock.MatchedBy(func(ms []*spanner.Mutation) bool {
-							// 2k in files
+							// 2k in files, 2k in file_subsystems
 							return len(ms) == 1000
 						})).
 					Return(time.Now(), nil).
-					Times(2).
+					Times(4).
 					On("Apply",
 						mock.Anything,
 						mock.MatchedBy(func(ms []*spanner.Mutation) bool {
@@ -114,7 +122,11 @@ func TestSaveMergeResult(t *testing.T) {
 			if test.mockTune != nil {
 				test.mockTune(t, spannerMock)
 			}
-			gotRows, err := SaveMergeResult(t.Context(), spannerMock, test.descr, json.NewDecoder(test.jsonl))
+			gotRows, err := SaveMergeResult(
+				context.Background(),
+				spannerMock,
+				test.descr,
+				json.NewDecoder(test.jsonl), test.sss)
 			if test.wantErr {
 				assert.Error(t, err)
 			} else {

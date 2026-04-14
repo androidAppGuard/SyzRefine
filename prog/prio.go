@@ -9,6 +9,8 @@ import (
 	"math/rand"
 	"slices"
 	"sort"
+
+	"github.com/google/syzkaller/pkg/log"
 )
 
 // Calulation of call-to-call priorities.
@@ -26,14 +28,11 @@ import (
 // Note: the current implementation is very basic, there is no theory behind any
 // constants.
 
-// CalculatePriorities returns the priority matrix as well as the map of generatable syscalls.
-// The rows/columns corresponding to the non-generatable syscalls are left to be 0.
-func (target *Target) CalculatePriorities(corpus []*Prog, enabled map[*Syscall]bool) ([][]int32, map[*Syscall]bool) {
-	enabled = target.prepareEnabledSyscalls(corpus, enabled)
-	static := target.calcStaticPriorities(enabled)
+func (target *Target) CalculatePriorities(corpus []*Prog) [][]int32 {
+	static := target.calcStaticPriorities()
 	if len(corpus) != 0 {
 		// Let's just sum the static and dynamic distributions.
-		dynamic := target.calcDynamicPrio(corpus, enabled)
+		dynamic := target.calcDynamicPrio(corpus)
 		for i, prios := range dynamic {
 			dst := static[i]
 			for j, p := range prios {
@@ -41,58 +40,11 @@ func (target *Target) CalculatePriorities(corpus []*Prog, enabled map[*Syscall]b
 			}
 		}
 	}
-	if debug {
-		for _, syscall := range target.Syscalls {
-			if enabled[syscall] {
-				continue
-			}
-			for i := range static {
-				if static[i][syscall.ID] != 0 || static[syscall.ID][i] != 0 {
-					panic(fmt.Sprintf("prio matrix has non-zero value for a disabled syscall %d",
-						syscall.ID))
-				}
-			}
-		}
-	}
-	return static, enabled
+	return static
 }
 
-func (target *Target) prepareEnabledSyscalls(corpus []*Prog, enabled map[*Syscall]bool) map[*Syscall]bool {
-	if enabled == nil {
-		enabled = make(map[*Syscall]bool)
-		for _, c := range target.Syscalls {
-			enabled[c] = true
-		}
-	}
-	noGenerateCalls := make(map[int]bool)
-	enabledCalls := make(map[*Syscall]bool)
-	for call := range enabled {
-		if call.Attrs.NoGenerate {
-			noGenerateCalls[call.ID] = true
-		} else if !call.Attrs.Disabled {
-			enabledCalls[call] = true
-		}
-	}
-	// Some validation checks.
-	if len(enabledCalls) == 0 {
-		panic("no syscalls enabled and generatable")
-	}
-	for _, p := range corpus {
-		for _, call := range p.Calls {
-			if !enabledCalls[call.Meta] && !noGenerateCalls[call.Meta.ID] {
-				fmt.Printf("corpus contains disabled syscall %v\n", call.Meta.Name)
-				for call := range enabled {
-					fmt.Printf("%s: enabled\n", call.Name)
-				}
-				panic("disabled syscall")
-			}
-		}
-	}
-	return enabledCalls
-}
-
-func (target *Target) calcStaticPriorities(enabled map[*Syscall]bool) [][]int32 {
-	uses := target.calcResourceUsage(enabled)
+func (target *Target) calcStaticPriorities() [][]int32 {
+	uses := target.calcResourceUsage()
 	prios := make([][]int32, len(target.Syscalls))
 	for i := range prios {
 		prios[i] = make([]int32, len(target.Syscalls))
@@ -111,27 +63,22 @@ func (target *Target) calcStaticPriorities(enabled map[*Syscall]bool) [][]int32 
 		}
 	}
 	// The value assigned for self-priority (call wrt itself) have to be high, but not too high.
-	for c := range enabled {
-		id, pp := c.ID, prios[c.ID]
+	for c0, pp := range prios {
 		max := slices.Max(pp)
 		if max == 0 {
-			pp[id] = 1
+			pp[c0] = 1
 		} else {
-			pp[id] = max * 3 / 4
+			pp[c0] = max * 3 / 4
 		}
 	}
-	normalizePrios(prios, len(enabled))
+	normalizePrios(prios)
 	return prios
 }
 
-func (target *Target) calcResourceUsage(enabled map[*Syscall]bool) map[string]map[int]weights {
+func (target *Target) calcResourceUsage() map[string]map[int]weights {
 	uses := make(map[string]map[int]weights)
 	ForeachType(target.Syscalls, func(t Type, ctx *TypeCtx) {
 		c := ctx.Meta
-		if !enabled[c] {
-			ctx.Stop = true
-			return
-		}
 		switch a := t.(type) {
 		case *ResourceType:
 			if target.AuxResources[a.Desc.Name] {
@@ -210,20 +157,14 @@ func noteUsagef(uses map[string]map[int]weights, c *Syscall, weight int32, dir D
 	uses[id][c.ID] = callWeight
 }
 
-func (target *Target) calcDynamicPrio(corpus []*Prog, enabled map[*Syscall]bool) [][]int32 {
+func (target *Target) calcDynamicPrio(corpus []*Prog) [][]int32 {
 	prios := make([][]int32, len(target.Syscalls))
 	for i := range prios {
 		prios[i] = make([]int32, len(target.Syscalls))
 	}
 	for _, p := range corpus {
 		for idx0, c0 := range p.Calls {
-			if !enabled[c0.Meta] {
-				continue
-			}
 			for _, c1 := range p.Calls[idx0+1:] {
-				if !enabled[c1.Meta] {
-					continue
-				}
 				prios[c0.Meta.ID][c1.Meta.ID]++
 			}
 		}
@@ -236,14 +177,13 @@ func (target *Target) calcDynamicPrio(corpus []*Prog, enabled map[*Syscall]bool)
 			prios[i][j] = int32(2.0 * math.Sqrt(float64(val)))
 		}
 	}
-	normalizePrios(prios, len(enabled))
+	normalizePrios(prios)
 	return prios
 }
 
 // normalizePrio distributes |N| * 10 points proportional to the values in the matrix.
-// |N| is the number of the generatable syscalls.
-func normalizePrios(prios [][]int32, n int) {
-	total := 10 * int32(n)
+func normalizePrios(prios [][]int32) {
+	total := 10 * int32(len(prios))
 	for _, prio := range prios {
 		sum := int32(0)
 		for _, p := range prio {
@@ -267,15 +207,43 @@ type ChoiceTable struct {
 }
 
 func (target *Target) BuildChoiceTable(corpus []*Prog, enabled map[*Syscall]bool) *ChoiceTable {
-	prios, enabledCalls := target.CalculatePriorities(corpus, enabled)
+	if enabled == nil {
+		enabled = make(map[*Syscall]bool)
+		for _, c := range target.Syscalls {
+			enabled[c] = true
+		}
+	}
+	noGenerateCalls := make(map[int]bool)
+	enabledCalls := make(map[*Syscall]bool)
+	for call := range enabled {
+		if call.Attrs.NoGenerate {
+			noGenerateCalls[call.ID] = true
+		} else if !call.Attrs.Disabled {
+			enabledCalls[call] = true
+		}
+	}
 	var generatableCalls []*Syscall
 	for c := range enabledCalls {
 		generatableCalls = append(generatableCalls, c)
 	}
+	if len(generatableCalls) == 0 {
+		panic("no syscalls enabled and generatable")
+	}
 	sort.Slice(generatableCalls, func(i, j int) bool {
 		return generatableCalls[i].ID < generatableCalls[j].ID
 	})
-
+	for _, p := range corpus {
+		for _, call := range p.Calls {
+			if !enabledCalls[call.Meta] && !noGenerateCalls[call.Meta.ID] {
+				fmt.Printf("corpus contains disabled syscall %v\n", call.Meta.Name)
+				for call := range enabled {
+					fmt.Printf("%s: enabled\n", call.Name)
+				}
+				panic("disabled syscall")
+			}
+		}
+	}
+	prios := target.CalculatePriorities(corpus)
 	run := make([][]int32, len(target.Syscalls))
 	// ChoiceTable.runs[][] contains cumulated sum of weighted priority numbers.
 	// This helps in quick binary search with biases when generating programs.
@@ -309,8 +277,10 @@ func (ct *ChoiceTable) choose(r *rand.Rand, bias int) int {
 		bias = ct.calls[r.Intn(len(ct.calls))].ID
 	}
 	if !ct.Generatable(bias) {
-		fmt.Printf("bias to disabled or non-generatable syscall %v\n", ct.target.Syscalls[bias].Name)
-		panic("disabled or non-generatable syscall")
+		bias = ct.calls[r.Intn(len(ct.calls))].ID
+		log.Logf(0, "bias to disabled or non-generatable syscall %v\n", ct.target.Syscalls[bias].Name)
+		// fmt.Printf("bias to disabled or non-generatable syscall %v\n", ct.target.Syscalls[bias].Name)
+		// panic("disabled or non-generatable syscall")
 	}
 	run := ct.runs[bias]
 	runSum := int(run[len(run)-1])
@@ -323,8 +293,6 @@ func (ct *ChoiceTable) choose(r *rand.Rand, bias int) int {
 	}
 	return res
 }
-
-// Consume Code
 func (ct *ChoiceTable) choose_extension(r *rand.Rand, bias int) int {
 	if bias < 0 {
 		bias = ct.calls[r.Intn(len(ct.calls))].ID
@@ -345,6 +313,7 @@ func (ct *ChoiceTable) choose_extension(r *rand.Rand, bias int) int {
 	return res
 }
 
+// Consume Code
 func (ct *ChoiceTable) ChooseRelatedCalls(r *rand.Rand, callId int, number int) []*Syscall {
 	if !ct.Generatable(callId) {
 		return nil
@@ -355,7 +324,7 @@ func (ct *ChoiceTable) ChooseRelatedCalls(r *rand.Rand, callId int, number int) 
 		selectMap[idx] = true
 	}
 	selectCalls := []*Syscall{}
-	for idx, _ := range selectMap {
+	for idx := range selectMap {
 		if !ct.target.Syscalls[idx].Attrs.Disabled && !ct.target.Syscalls[idx].Attrs.NoGenerate {
 			selectCalls = append(selectCalls, ct.target.Syscalls[idx])
 		}

@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 	_ "unsafe" // required to use go:linkname
+
+	"github.com/google/syzkaller/pkg/log"
 )
 
 const (
@@ -65,9 +67,9 @@ func Run(timeout time.Duration, cmd *exec.Cmd) ([]byte, error) {
 	err := cmd.Wait()
 	close(done)
 	if err != nil {
-		retErr := fmt.Errorf("failed to run %q: %w", cmd.Args, err)
+		text := fmt.Sprintf("failed to run %q: %v", cmd.Args, err)
 		if <-timedout {
-			retErr = fmt.Errorf("timedout after %v %q", timeout, cmd.Args)
+			text = fmt.Sprintf("timedout after %v %q", timeout, cmd.Args)
 		}
 		exitCode := cmd.ProcessState.ExitCode()
 		var exitErr *exec.ExitError
@@ -77,7 +79,7 @@ func Run(timeout time.Duration, cmd *exec.Cmd) ([]byte, error) {
 			}
 		}
 		return output.Bytes(), &VerboseError{
-			Err:      retErr,
+			Title:    text,
 			Output:   output.Bytes(),
 			ExitCode: exitCode,
 		}
@@ -98,6 +100,7 @@ func CommandContext(ctx context.Context, bin string, args ...string) *exec.Cmd {
 func Command(bin string, args ...string) *exec.Cmd {
 	cmd := exec.Command(bin, args...)
 	setPdeathsig(cmd, true)
+	log.Logf(0, "cmd in Command(: %v", cmd)
 	return cmd
 }
 
@@ -111,17 +114,27 @@ func GraciousCommand(bin string, args ...string) *exec.Cmd {
 }
 
 type VerboseError struct {
-	Err      error
+	Title    string
 	Output   []byte
 	ExitCode int
 }
 
 func (err *VerboseError) Error() string {
-	return err.Err.Error()
+	if len(err.Output) == 0 {
+		return err.Title
+	}
+	return fmt.Sprintf("%v\n%s", err.Title, err.Output)
 }
 
-func (err *VerboseError) Unwrap() error {
-	return err.Err
+func PrependContext(ctx string, err error) error {
+	var verboseError *VerboseError
+	switch {
+	case errors.As(err, &verboseError):
+		verboseError.Title = fmt.Sprintf("%v: %v", ctx, verboseError.Title)
+		return verboseError
+	default:
+		return fmt.Errorf("%v: %w", ctx, err)
+	}
 }
 
 func IsDir(name string) bool {
@@ -245,19 +258,6 @@ func MkdirAll(dir string) error {
 
 func WriteFile(filename string, data []byte) error {
 	return os.WriteFile(filename, data, DefaultFilePerm)
-}
-
-// WriteFileAtomically writes data to file filename without exposing and empty/partially-written file.
-// This is useful for writing generated source files. Exposing an empty file may break tools
-// that run on  source files in parallel.
-func WriteFileAtomically(filename string, data []byte) error {
-	// We can't use os.CreateTemp b/c it may be on a different mount,
-	// and Rename can't move across mounts.
-	tmpFile := filename + ".tmp"
-	if err := WriteFile(tmpFile, data); err != nil {
-		return err
-	}
-	return os.Rename(tmpFile, filename)
 }
 
 func WriteJSON[T any](filename string, obj T) error {

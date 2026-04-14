@@ -1,6 +1,8 @@
 // Copyright 2017 syzkaller project authors. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
+//go:generate go run gen.go
+
 package csource
 
 import (
@@ -56,7 +58,7 @@ func createCommonHeader(p, mmapProg *prog.Prog, replacements map[string]string, 
 	}
 
 	for from, to := range replacements {
-		src = bytes.ReplaceAll(src, []byte("/*{{{"+from+"}}}*/"), []byte(to))
+		src = bytes.Replace(src, []byte("/*{{{"+from+"}}}*/"), []byte(to), -1)
 	}
 
 	for from, to := range map[string]string{
@@ -65,7 +67,7 @@ func createCommonHeader(p, mmapProg *prog.Prog, replacements map[string]string, 
 		"uint16": "uint16_t",
 		"uint8":  "uint8_t",
 	} {
-		src = bytes.ReplaceAll(src, []byte(from), []byte(to))
+		src = bytes.Replace(src, []byte(from), []byte(to), -1)
 	}
 	src = regexp.MustCompile("#define SYZ_HAVE_.*").ReplaceAll(src, nil)
 
@@ -132,13 +134,10 @@ func commonDefines(p *prog.Prog, opts Options) map[string]bool {
 
 func removeSystemDefines(src []byte, defines []string) ([]byte, error) {
 	remove := map[string]string{
-		"__STDC__":                 "1",
-		"__STDC_HOSTED__":          "1",
-		"__STDC_UTF_16__":          "1",
-		"__STDC_UTF_32__":          "1",
-		"__STDC_EMBED_NOT_FOUND__": "0",
-		"__STDC_EMBED_FOUND__":     "1",
-		"__STDC_EMBED_EMPTY__":     "2",
+		"__STDC__":        "1",
+		"__STDC_HOSTED__": "1",
+		"__STDC_UTF_16__": "1",
+		"__STDC_UTF_32__": "1",
 	}
 	for _, def := range defines {
 		eq := strings.IndexByte(def, '=')
@@ -149,7 +148,7 @@ func removeSystemDefines(src []byte, defines []string) ([]byte, error) {
 		}
 	}
 	for def, val := range remove {
-		src = bytes.ReplaceAll(src, []byte("#define "+def+" "+val+"\n"), nil)
+		src = bytes.Replace(src, []byte("#define "+def+" "+val+"\n"), nil, -1)
 	}
 	// strip: #define __STDC_VERSION__ 201112L
 	for _, def := range []string{"__STDC_VERSION__"} {
@@ -161,7 +160,7 @@ func removeSystemDefines(src []byte, defines []string) ([]byte, error) {
 		if end == -1 {
 			continue
 		}
-		src = bytes.ReplaceAll(src, src[pos:end+1], nil)
+		src = bytes.Replace(src, src[pos:end+1], nil, -1)
 	}
 	return src, nil
 }

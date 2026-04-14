@@ -15,7 +15,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -25,6 +24,7 @@ import (
 	"github.com/google/syzkaller/dashboard/dashapi"
 	"github.com/google/syzkaller/pkg/asset"
 	"github.com/google/syzkaller/pkg/corpus"
+	"github.com/google/syzkaller/pkg/csource"
 	"github.com/google/syzkaller/pkg/db"
 	"github.com/google/syzkaller/pkg/flatrpc"
 	"github.com/google/syzkaller/pkg/fuzzer"
@@ -32,7 +32,6 @@ import (
 	"github.com/google/syzkaller/pkg/gce"
 	"github.com/google/syzkaller/pkg/ifaceprobe"
 	"github.com/google/syzkaller/pkg/image"
-	"github.com/google/syzkaller/pkg/kfuzztest"
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/manager"
 	"github.com/google/syzkaller/pkg/mgrconfig"
@@ -57,6 +56,10 @@ var (
 	flagBench  = flag.String("bench", "", "write execution statistics into this file periodically")
 	flagMode   = flag.String("mode", ModeFuzzing.Name, modesDescription())
 	flagTests  = flag.String("tests", "", "prefix to match test file names (for -mode run-tests)")
+
+	flagLLMMode  = flag.String("llm_mode", "", "llm mode name")
+	flagLLMURL   = flag.String("llm_url", "", "llm mode api url")
+	flagLLMTOKEN = flag.String("llm_token", "", "llm mode token")
 )
 
 type Manager struct {
@@ -169,9 +172,6 @@ var (
 			if cfg.Sandbox != "none" {
 				return fmt.Errorf("sandbox \"%v\" is not supported (only \"none\")", cfg.Sandbox)
 			}
-			if !cfg.Cover {
-				return fmt.Errorf("coverage is required")
-			}
 			return nil
 		},
 	}
@@ -230,6 +230,7 @@ func main() {
 			break
 		}
 	}
+	// Annotation: mode default is ModeFuzzing (mode: ModeFuzzing)
 	if mode == nil {
 		flag.PrintDefaults()
 		log.Fatalf("unknown mode: %v", *flagMode)
@@ -243,14 +244,6 @@ func main() {
 		cfg.DashboardClient = ""
 		cfg.HubClient = ""
 	}
-	if cfg.Experimental.EnableKFuzzTest {
-		vmLinuxPath := path.Join(cfg.KernelObj, cfg.SysTarget.KernelObject)
-		log.Log(0, "enabling KFuzzTest targets")
-		_, err := kfuzztest.ActivateKFuzzTargets(cfg.Target, vmLinuxPath)
-		if err != nil {
-			log.Fatalf("failed to enable KFuzzTest targets: %v", err)
-		}
-	}
 	RunManager(mode, cfg)
 }
 
@@ -258,6 +251,7 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 	var vmPool *vm.Pool
 	if !cfg.VMLess {
 		var err error
+		// Annotation: only create qemu configuration, do not run qemu instance
 		vmPool, err = vm.Create(cfg, *flagDebug)
 		if err != nil {
 			log.Fatalf("%v", err)
@@ -294,6 +288,8 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 	if *flagDebug {
 		mgr.cfg.Procs = 1
 	}
+
+	log.Logf(0, "target resource :%v\n", len(mgr.target.Resources))
 	mgr.http = &manager.HTTPServer{
 		// Note that if cfg.HTTP == "", we don't start the server.
 		Cfg:        cfg,
@@ -325,6 +321,10 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 	}
 	ctx := vm.ShutdownCtx()
 	go func() {
+		// Annotation: Core Function (Fuzzer/Mutation/Job) [Host Machine]
+		// Annotation: 1. create a fuzzerObj by 'serv.runCheck'; 2. do loop to consume fuzzerObj's jobs by 'serv.handleConn'
+		// Annotation: 'serv.runCheck' generate initial candidates to execute;
+		// Annotation: 'serv.handleConn' is a listener and only is triggered by vm.executor
 		err := mgr.serv.Serve(ctx)
 		if err != nil {
 			log.Fatalf("%s", err)
@@ -369,10 +369,12 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 		<-vm.Shutdown
 		return
 	}
+	// Annotation: Core Function [VM Machine]
+	// Annotation: 1. create/start qemu instance by 'pool.Create'; 2. run executor bin in this qemu instance by 'mgr.fuzzerInstance'
+	// Annotation: 'pool.Create' and 'mgr.fuzzerInstance' call in Loop
 	mgr.pool = vm.NewDispatcher(mgr.vmPool, mgr.fuzzerInstance)
 	mgr.http.Pool = mgr.pool
-	reproVMs := max(0, mgr.vmPool.Count()-mgr.cfg.FuzzingVMs)
-	mgr.reproLoop = manager.NewReproLoop(mgr, reproVMs, mgr.cfg.DashboardOnlyRepro)
+	mgr.reproLoop = manager.NewReproLoop(mgr, mgr.vmPool.Count()-mgr.cfg.FuzzingVMs, mgr.cfg.DashboardOnlyRepro)
 	mgr.http.ReproLoop = mgr.reproLoop
 	mgr.http.TogglePause = mgr.pool.TogglePause
 
@@ -504,7 +506,7 @@ func reportReproError(err error) {
 		// The kernel could have crashed before we executed any programs.
 		log.Logf(0, "repro failed: %v", err)
 		return
-	} else if errors.Is(err, repro.ErrNoVMs) || errors.Is(err, context.Canceled) {
+	} else if errors.Is(err, repro.ErrNoVMs) {
 		// This error is to be expected if we're shutting down.
 		if shutdown {
 			return
@@ -514,8 +516,8 @@ func reportReproError(err error) {
 	log.Errorf("repro failed: %v", err)
 }
 
-func (mgr *Manager) RunRepro(ctx context.Context, crash *manager.Crash) *manager.ReproResult {
-	res, stats, err := repro.Run(ctx, crash.Output, repro.Environment{
+func (mgr *Manager) RunRepro(crash *manager.Crash) *manager.ReproResult {
+	res, stats, err := repro.Run(context.Background(), crash.Output, repro.Environment{
 		Config:   mgr.cfg,
 		Features: mgr.enabledFeatures,
 		Reporter: mgr.reporter,
@@ -605,25 +607,22 @@ func (mgr *Manager) fuzzerInstance(ctx context.Context, inst *vm.Instance, updIn
 		return
 	}
 	injectExec := make(chan bool, 10)
-	serv.CreateInstance(inst.Index(), injectExec, updInfo)
-
-	reps, vmInfo, err := mgr.runInstanceInner(ctx, inst,
-		vm.WithExitCondition(vm.ExitTimeout),
-		vm.WithInjectExecuting(injectExec),
-		vm.WithEarlyFinishCb(func() {
-			// Depending on the crash type and kernel config, fuzzing may continue
-			// running for several seconds even after kernel has printed a crash report.
-			// This litters the log, and we want to prevent it.
-			serv.StopFuzzing(inst.Index())
-		}))
+	// Annotation: /data/ghui/phd2/experiment_code/syzkaller_new/pkg/rpcserver/rpcserver.go
+	// Annotation: func (serv *server) CreateInstance(id int, injectExec chan<- bool, updInfo dispatcher.UpdateInfo)
+	serv.CreateInstance(inst.Index(), injectExec, updInfo) // assign inst(instance) => serv.runners
+	// Annotation: copy and run execute bin to inst
+	log.Logf(0, "mgr.runInstanceInner\n")
+	rep, vmInfo, err := mgr.runInstanceInner(ctx, inst, injectExec, vm.EarlyFinishCb(func() {
+		// Depending on the crash type and kernel config, fuzzing may continue
+		// running for several seconds even after kernel has printed a crash report.
+		// This litters the log and we want to prevent it.
+		serv.StopFuzzing(inst.Index())
+	}))
 	var extraExecs []report.ExecutorInfo
-	var rep *report.Report
-	if len(reps) != 0 {
-		rep = reps[0]
-	}
 	if rep != nil && rep.Executor != nil {
 		extraExecs = []report.ExecutorInfo{*rep.Executor}
 	}
+	log.Logf(0, "serv.ShutdownInstance\n")
 	lastExec, machineInfo := serv.ShutdownInstance(inst.Index(), rep != nil, extraExecs...)
 	if rep != nil {
 		rpcserver.PrependExecuting(rep, lastExec)
@@ -636,7 +635,6 @@ func (mgr *Manager) fuzzerInstance(ctx context.Context, inst *vm.Instance, updIn
 		mgr.crashes <- &manager.Crash{
 			InstanceIndex: inst.Index(),
 			Report:        rep,
-			TailReports:   reps[1:],
 		}
 	}
 	if err != nil {
@@ -644,8 +642,8 @@ func (mgr *Manager) fuzzerInstance(ctx context.Context, inst *vm.Instance, updIn
 	}
 }
 
-func (mgr *Manager) runInstanceInner(ctx context.Context, inst *vm.Instance, opts ...func(*vm.RunOptions),
-) ([]*report.Report, []byte, error) {
+func (mgr *Manager) runInstanceInner(ctx context.Context, inst *vm.Instance, injectExec <-chan bool,
+	finishCb vm.EarlyFinishCb) (*report.Report, []byte, error) {
 	fwdAddr, err := inst.Forward(mgr.serv.Port())
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to setup port forwarding: %w", err)
@@ -655,6 +653,8 @@ func (mgr *Manager) runInstanceInner(ctx context.Context, inst *vm.Instance, opt
 	// so no need to copy it.
 	executorBin := mgr.sysTarget.ExecutorBin
 	if executorBin == "" {
+		// Annotation: /data/ghui/phd2/experiment_code/syzkaller_new/vm/qemu/qemu.go
+		// Annotation: func (inst *instance) Copy(hostSrc string) (string, error)
 		executorBin, err = inst.Copy(mgr.cfg.ExecutorBin)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to copy binary: %w", err)
@@ -663,19 +663,20 @@ func (mgr *Manager) runInstanceInner(ctx context.Context, inst *vm.Instance, opt
 
 	// Run the fuzzer binary.
 	start := time.Now()
-
 	host, port, err := net.SplitHostPort(fwdAddr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse manager's address")
 	}
 	cmd := fmt.Sprintf("%v runner %v %v %v", executorBin, inst.Index(), host, port)
-	ctxTimeout, cancel := context.WithTimeout(ctx, mgr.cfg.Timeouts.VMRunningTime)
-	defer cancel()
-	_, reps, err := inst.Run(ctxTimeout, mgr.reporter, cmd, opts...)
+	// Annotation: inst will loop in here to its monitor execution info
+	_, rep, err := inst.Run(mgr.cfg.Timeouts.VMRunningTime, mgr.reporter, cmd,
+		vm.ExitTimeout, vm.StopContext(ctx), vm.InjectExecuting(injectExec),
+		finishCb,
+	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to run fuzzer: %w", err)
 	}
-	if len(reps) == 0 {
+	if rep == nil {
 		// This is the only "OK" outcome.
 		log.Logf(0, "VM %v: running for %v, restarting", inst.Index(), time.Since(start))
 		return nil, nil, nil
@@ -684,7 +685,7 @@ func (mgr *Manager) runInstanceInner(ctx context.Context, inst *vm.Instance, opt
 	if err != nil {
 		vmInfo = []byte(fmt.Sprintf("error getting VM info: %v\n", err))
 	}
-	return reps, vmInfo, nil
+	return rep, vmInfo, nil
 }
 
 func (mgr *Manager) emailCrash(crash *manager.Crash) {
@@ -711,7 +712,7 @@ func (mgr *Manager) saveCrash(crash *manager.Crash) bool {
 		mgr.memoryLeakFrames[crash.Frame] = true
 		mgr.mu.Unlock()
 	}
-	if crash.Type == crash_pkg.KCSANDataRace {
+	if crash.Type == crash_pkg.DataRace {
 		mgr.mu.Lock()
 		mgr.dataRaceFrames[crash.Frame] = true
 		mgr.mu.Unlock()
@@ -723,10 +724,7 @@ func (mgr *Manager) saveCrash(crash *manager.Crash) bool {
 	if crash.Suppressed {
 		flags += " [suppressed]"
 	}
-	log.Logf(0, "VM %v: crash: %v%v", crash.InstanceIndex, crash.Report.Title, flags)
-	for i, report := range crash.TailReports {
-		log.Logf(0, "VM %v: crash(tail%d): %v%v", crash.InstanceIndex, i, report.Title, flags)
-	}
+	log.Logf(0, "VM %v: crash: %v%v", crash.InstanceIndex, crash.Title, flags)
 
 	if mgr.mode.FailOnCrashes {
 		path := filepath.Join(mgr.cfg.Workdir, "report.json")
@@ -763,7 +761,7 @@ func (mgr *Manager) saveCrash(crash *manager.Crash) bool {
 			Suppressed:  crash.Suppressed,
 			Recipients:  crash.Recipients.ToDash(),
 			Log:         crash.Output,
-			Report:      report.SplitReportBytes(crash.Report.Report)[0],
+			Report:      crash.Report.Report,
 			MachineInfo: crash.MachineInfo,
 		}
 		setGuiltyFiles(dc, crash.Report)
@@ -881,9 +879,14 @@ func (mgr *Manager) saveRepro(res *manager.ReproResult) {
 
 	var cprogText []byte
 	if repro.CRepro {
-		var err error
-		cprogText, err = repro.CProgram()
-		if err != nil {
+		cprog, err := csource.Write(repro.Prog, repro.Opts)
+		if err == nil {
+			formatted, err := csource.Format(cprog)
+			if err == nil {
+				cprog = formatted
+			}
+			cprogText = cprog
+		} else {
 			log.Logf(0, "failed to write C source: %v", err)
 		}
 	}
@@ -895,27 +898,27 @@ func (mgr *Manager) saveRepro(res *manager.ReproResult) {
 		//    so maybe corrupted report detection is broken.
 		// 3. Reproduction is expensive so it's good to persist the result.
 
-		reproReport := repro.Report
-		output := reproReport.Output
+		report := repro.Report
+		output := report.Output
 
 		var crashFlags dashapi.CrashFlags
 		if res.Strace != nil {
 			// If syzkaller managed to successfully run the repro with strace, send
 			// the report and the output generated under strace.
-			reproReport = res.Strace.Report
+			report = res.Strace.Report
 			output = res.Strace.Output
 			crashFlags = dashapi.CrashUnderStrace
 		}
 
 		dc := &dashapi.Crash{
 			BuildID:       mgr.cfg.Tag,
-			Title:         reproReport.Title,
-			AltTitles:     reproReport.AltTitles,
-			Suppressed:    reproReport.Suppressed,
-			Recipients:    reproReport.Recipients.ToDash(),
+			Title:         report.Title,
+			AltTitles:     report.AltTitles,
+			Suppressed:    report.Suppressed,
+			Recipients:    report.Recipients.ToDash(),
 			Log:           output,
 			Flags:         crashFlags,
-			Report:        report.SplitReportBytes(reproReport.Report)[0],
+			Report:        report.Report,
 			ReproOpts:     repro.Opts.Serialize(),
 			ReproSyz:      progText,
 			ReproC:        cprogText,
@@ -923,7 +926,7 @@ func (mgr *Manager) saveRepro(res *manager.ReproResult) {
 			Assets:        mgr.uploadReproAssets(repro),
 			OriginalTitle: res.Crash.Title,
 		}
-		setGuiltyFiles(dc, reproReport)
+		setGuiltyFiles(dc, report)
 		if _, err := mgr.dash.ReportCrash(dc); err != nil {
 			log.Logf(0, "failed to report repro to dashboard: %v", err)
 		} else {
@@ -1123,22 +1126,6 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 		mgr.exit(mgr.mode.Name)
 	}
 
-	// If KFuzzTest is enabled, we exclusively fuzz KFuzzTest targets - so
-	// delete any existing entries in enabled syscalls, and enable all
-	// discovered KFuzzTest targets explicitly.
-	if mgr.cfg.Experimental.EnableKFuzzTest {
-		for call := range enabledSyscalls {
-			delete(enabledSyscalls, call)
-		}
-		data, err := kfuzztest.ExtractData(path.Join(mgr.cfg.KernelObj, "vmlinux"))
-		if err != nil {
-			return nil, err
-		}
-		for _, call := range data.Calls {
-			enabledSyscalls[call] = true
-		}
-	}
-
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
 	if mgr.phase != phaseInit {
@@ -1156,15 +1143,16 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 	candidates := mgr.loadCorpus(enabledSyscalls)
 	mgr.setPhaseLocked(phaseLoadedCorpus)
 	opts := fuzzer.DefaultExecOpts(mgr.cfg, features, *flagDebug)
+	log.Logf(0, "number of enabledCalls in this syzkaller version:%v\n", len(enabledSyscalls))
 
-	switch mgr.mode {
-	case ModeFuzzing, ModeCorpusTriage:
+	if mgr.mode == ModeFuzzing || mgr.mode == ModeCorpusTriage {
 		corpusUpdates := make(chan corpus.NewItemEvent, 128)
 		mgr.corpus = corpus.NewFocusedCorpus(context.Background(),
 			corpusUpdates, mgr.coverFilters.Areas)
 		mgr.http.Corpus.Store(mgr.corpus)
 
 		rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+		// Annotation: 3. create a fuzzerObj
 		fuzzerObj := fuzzer.NewFuzzer(context.Background(), &fuzzer.Config{
 			Corpus:         mgr.corpus,
 			Snapshot:       mgr.cfg.Snapshot,
@@ -1186,55 +1174,108 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 				defer mgr.mu.Unlock()
 				return !mgr.saturatedCalls[call]
 			},
-			ModeKFuzzTest: mgr.cfg.Experimental.EnableKFuzzTest,
 		}, rnd, mgr.target)
 
 		// Instrumentation
+		if *flagLLMMode != ""{
+			mgr.target.LLMMODE = *flagLLMMode
+		}else {
+			mgr.target.LLMMODE = "gpt-4o-mini-ca"
+		}
+		if *flagLLMURL != ""{
+			mgr.target.LLMURL = *flagLLMURL
+		}else {
+			mgr.target.LLMURL = ""
+		}
+		if *flagLLMTOKEN != ""{
+			mgr.target.LLMTOKEN = *flagLLMTOKEN
+		}else {
+			mgr.target.LLMTOKEN = ""
+		}
 		mgr.target.CallCorpus = &prog.CallCorpus{
 			ValidProgsMap:       make(map[string][]*prog.Prog),
 			InvalidProgsMap:     make(map[string][]*prog.Prog),
 			CrashProgsMap:       make(map[string][]*prog.Prog),
 			CallExecuteCountMap: make(map[string]*prog.CallCount),
 		}
+		mgr.target.PriorityQueue = make(map[int]*prog.QueueElement)
+		for enableCall := range enabledSyscalls {
+			if enableCall.Attrs.Disabled {
+				continue
+			}
+			mgr.target.PriorityQueue[enableCall.ID] = &prog.QueueElement{
+				Id:                      enableCall.ID,
+				MetaCall:                enableCall,
+				Priority:                100,
+				InterestingInvalidProgs: []*prog.Prog{},
+				InterestingValidCount:   0,
+				UsedBudget:              0,
+				Target:                  mgr.target,
+			}
+		}
 		done := make(chan bool)
 		minute := 0
 		go func() {
-			ticker := time.NewTicker(300 * time.Minute)
+			ticker := time.NewTicker(time.Minute) // 1 Minimute 7 budget
 			defer ticker.Stop()
-			log.Logf(0, "NewTicker run")
+			log.Logf(0, "LLM-Enhanched Operation Ticker Run")
 			for {
 				select {
 				case <-done:
-					log.Logf(0, "NewTicker end")
+					log.Logf(0, "LLM-Enhanched Operation Ticker End")
 					return
 				case <-ticker.C:
 					minute++
-					generationCount := 0
-					for enableCall := range enabledSyscalls {
-						if enableCall.Attrs.Disabled || enableCall.Attrs.NoGenerate {
+					// 1) Update priority
+					queueElements := []*prog.QueueElement{}
+					for _, queueElement := range mgr.target.PriorityQueue {
+						queueElement.UpdatePriority(mgr.target.CallCorpus, minute)
+						queueElements = append(queueElements, queueElement)
+					}
+
+					// 2) Select N System Call
+					sort.Slice(queueElements, func(i, j int) bool {
+						return queueElements[i].Priority > queueElements[j].Priority
+					})
+
+					// 3) LLM-enhanced operation
+					// queueElements = queueElements[:prog.BudgetInterval]
+					ids := ""
+					for _, queueElement := range queueElements {
+						if queueElement.Priority == 0 {
 							continue
 						}
-						if _, ok := mgr.target.CallCorpus.ValidProgsMap[enableCall.Name]; !ok {
-							if mgr.target.CallCorpus.GetCallExecuteLLMGenerationCount(enableCall.Name) < prog.ThresholdMaxLLMGeneration {
-								// fuzzer.GenerationCallOperator(enableCall, fuzzerObj)
-								mgr.target.CallCorpus.UpdateCallExecuteLLMGenerationCount(enableCall.Name)
-								generationCount++
+						if len(queueElement.InterestingInvalidProgs) != 0 { // interesting invalid context
+							for len(queueElement.InterestingInvalidProgs) != 0 {
+								interestingInvalidProg := queueElement.PopInterestingInvalidProg()
+								fuzzer.RepairCallOperator(interestingInvalidProg, len(interestingInvalidProg.Calls)-1, fuzzerObj)
 							}
+						} else {
+							if queueElement.MetaCall.Attrs.Disabled || queueElement.MetaCall.Attrs.NoGenerate {
+								continue
+							}
+							fuzzer.GenerationCallOperator(queueElement.MetaCall, fuzzerObj)
+							queueElement.AddUsedBudget()
 						}
+						ids = ids + fmt.Sprintf("%v(%.2f), ", queueElement.Id, queueElement.Priority)
 					}
-					log.Logf(0, "At %v minites, send %v GenerationCallOperator\n", minute*300, generationCount)
+					log.Logf(0, "ids: %s\n", ids)
+					log.Logf(0, "At %v minites, trigger LLM-Enhanched Operation.\n", minute)
 				}
 			}
 		}()
-		mgr.target.CallCorpus.LoadCrashProgs("/data1/stu_Guoh/phd2/script/corpus/crashprograms", mgr.target)
+		mgr.target.CallCorpus.LoadCrashProgs("/data1/stu_Guoh/phd2/script/tmp/pocPrograms", mgr.target)
 		log.Logf(0, "fuzzerObj.Config.EnabledCalls count:%v\n", len(fuzzerObj.Config.EnabledCalls))
 
+		// Annotation: the number of candidates is 775
 		fuzzerObj.AddCandidates(candidates)
 		mgr.fuzzer.Store(fuzzerObj)
 		mgr.http.Fuzzer.Store(fuzzerObj)
 
 		go mgr.corpusInputHandler(corpusUpdates)
 		go mgr.corpusMinimization()
+		// Annotation: this fuzzer instance create a client to trigger the function: err := serv.handleConn(ctx, conn)
+		// Annotation: Only one fuzzer, so handleConn will trigger once
 		go mgr.fuzzerLoop(fuzzerObj)
 		if mgr.dash != nil {
 			go mgr.dashboardReporter()
@@ -1253,14 +1294,14 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 				return nil
 			}), nil
 		}
-		return source, nil
-	case ModeCorpusRun:
+		return source, nil // source ={fuzzerObj,opts} =>then return
+	} else if mgr.mode == ModeCorpusRun {
 		ctx := &corpusRunner{
 			candidates: candidates,
 			rnd:        rand.New(rand.NewSource(time.Now().UnixNano())),
 		}
 		return queue.DefaultOpts(ctx, opts), nil
-	case ModeRunTests:
+	} else if mgr.mode == ModeRunTests {
 		ctx := &runtest.Context{
 			Dir:      filepath.Join(mgr.cfg.Syzkaller, "sys", mgr.cfg.Target.OS, "test"),
 			Target:   mgr.cfg.Target,
@@ -1282,7 +1323,7 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			mgr.exit("tests")
 		}()
 		return ctx, nil
-	case ModeIfaceProbe:
+	} else if mgr.mode == ModeIfaceProbe {
 		exec := queue.Plain()
 		go func() {
 			res, err := ifaceprobe.Run(vm.ShutdownCtx(), mgr.cfg, features, exec)
@@ -1360,8 +1401,7 @@ func (mgr *Manager) fuzzerLoop(fuzzer *fuzzer.Fuzzer) {
 				mgr.exit("corpus triage")
 			}
 			mgr.mu.Lock()
-			switch mgr.phase {
-			case phaseLoadedCorpus:
+			if mgr.phase == phaseLoadedCorpus {
 				if !mgr.cfg.Snapshot {
 					mgr.serv.TriagedCorpus()
 				}
@@ -1372,7 +1412,7 @@ func (mgr *Manager) fuzzerLoop(fuzzer *fuzzer.Fuzzer) {
 				} else {
 					mgr.setPhaseLocked(phaseTriagedHub)
 				}
-			case phaseQueriedHub:
+			} else if mgr.phase == phaseQueriedHub {
 				mgr.setPhaseLocked(phaseTriagedHub)
 			}
 			mgr.mu.Unlock()
@@ -1384,8 +1424,7 @@ func (mgr *Manager) setPhaseLocked(newPhase int) {
 	if mgr.phase == newPhase {
 		panic("repeated phase update")
 	}
-	// In VMLess mode, mgr.reproLoop is nil.
-	if newPhase == phaseTriagedHub && mgr.reproLoop != nil {
+	if newPhase == phaseTriagedHub {
 		// Start reproductions.
 		go mgr.reproLoop.Loop(vm.ShutdownCtx())
 	}

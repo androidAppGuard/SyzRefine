@@ -658,7 +658,7 @@ func (env *env) test() (*testResult, error) {
 		var verr *osutil.VerboseError
 		var kerr *build.KernelError
 		if errors.As(err, &verr) {
-			errInfo += verr.Error()
+			errInfo += verr.Title
 			env.saveDebugFile(current.Hash, 0, verr.Output)
 		} else if errors.As(err, &kerr) {
 			errInfo += string(kerr.Report)
@@ -749,10 +749,9 @@ func (env *env) testPredicate() (vcs.BisectResult, error) {
 	}
 	// For fix bisections, results are inverted.
 	if env.cfg.Fix {
-		switch testRes1.verdict {
-		case vcs.BisectBad:
+		if testRes1.verdict == vcs.BisectBad {
 			testRes1.verdict = vcs.BisectGood
-		case vcs.BisectGood:
+		} else if testRes1.verdict == vcs.BisectGood {
 			testRes1.verdict = vcs.BisectBad
 		}
 	}

@@ -6,7 +6,6 @@ package manager
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math/rand"
 	"net"
@@ -38,32 +37,8 @@ import (
 )
 
 type DiffFuzzerConfig struct {
-	Debug        bool
-	PatchedOnly  chan *UniqueBug
-	BaseCrashes  chan string
-	Store        *DiffFuzzerStore
-	ArtifactsDir string // Where to store the artifacts that supplement the logs.
-	// The fuzzer waits no more than MaxTriageTime time until it starts taking VMs away
-	// for bug reproduction.
-	// The option may help find a balance between spending too much time triaging
-	// the corpus and not reaching a proper kernel coverage.
-	MaxTriageTime time.Duration
-	// If non-empty, the fuzzer will spend no more than this amount of time
-	// trying to reach the modified code. The time is counted since the moment
-	// 99% of the corpus is triaged.
-	FuzzToReachPatched time.Duration
-	// The callback may be used to consult external systems on whether
-	// the crash should be ignored. E.g. because it doesn't match the filter or
-	// the particular base kernel has already been seen to crash with the given title.
-	// It helps reduce the number of unnecessary reproductions.
-	IgnoreCrash func(context.Context, string) (bool, error)
-}
-
-func (cfg *DiffFuzzerConfig) TriageDeadline() <-chan time.Time {
-	if cfg.MaxTriageTime == 0 {
-		return nil
-	}
-	return time.After(cfg.MaxTriageTime)
+	Debug       bool
+	PatchedOnly chan *UniqueBug
 }
 
 type UniqueBug struct {
@@ -73,14 +48,11 @@ type UniqueBug struct {
 }
 
 func RunDiffFuzzer(ctx context.Context, baseCfg, newCfg *mgrconfig.Config, cfg DiffFuzzerConfig) error {
-	if cfg.PatchedOnly == nil {
-		return fmt.Errorf("you must set up a patched only channel")
-	}
-	base, err := setup("base", baseCfg, cfg.Debug)
+	base, err := setup(ctx, "base", baseCfg, cfg.Debug)
 	if err != nil {
 		return err
 	}
-	new, err := setup("new", newCfg, cfg.Debug)
+	new, err := setup(ctx, "new", newCfg, cfg.Debug)
 	if err != nil {
 		return err
 	}
@@ -101,12 +73,12 @@ func RunDiffFuzzer(ctx context.Context, baseCfg, newCfg *mgrconfig.Config, cfg D
 	base.source = stream
 	new.duplicateInto = stream
 
+	store := &DiffFuzzerStore{BasePath: new.cfg.Workdir}
 	diffCtx := &diffContext{
-		cfg:           cfg,
 		doneRepro:     make(chan *ReproResult),
 		base:          base,
 		new:           new,
-		store:         cfg.Store,
+		store:         store,
 		reproAttempts: map[string]int{},
 		patchedOnly:   cfg.PatchedOnly,
 	}
@@ -114,7 +86,7 @@ func RunDiffFuzzer(ctx context.Context, baseCfg, newCfg *mgrconfig.Config, cfg D
 		diffCtx.http = &HTTPServer{
 			Cfg:       newCfg,
 			StartTime: time.Now(),
-			DiffStore: cfg.Store,
+			DiffStore: store,
 			Pools: map[string]*vm.Dispatcher{
 				new.name:  new.pool,
 				base.name: base.pool,
@@ -129,7 +101,6 @@ func RunDiffFuzzer(ctx context.Context, baseCfg, newCfg *mgrconfig.Config, cfg D
 }
 
 type diffContext struct {
-	cfg   DiffFuzzerConfig
 	store *DiffFuzzerStore
 	http  *HTTPServer
 
@@ -142,13 +113,6 @@ type diffContext struct {
 	reproAttempts map[string]int
 }
 
-const (
-	// Don't start reproductions until 90% of the corpus has been triaged.
-	corpusTriageToRepro = 0.9
-	// Start to monitor whether we reached the modified files only after triaging 99%.
-	corpusTriageToMonitor = 0.99
-)
-
 func (dc *diffContext) Loop(baseCtx context.Context) error {
 	g, ctx := errgroup.WithContext(baseCtx)
 	reproLoop := NewReproLoop(dc, dc.new.pool.Total()-dc.new.cfg.FuzzingVMs, false)
@@ -158,32 +122,31 @@ func (dc *diffContext) Loop(baseCtx context.Context) error {
 			return dc.http.Serve(ctx)
 		})
 	}
-
 	g.Go(func() error {
+		// Let both base and patched instances somewhat progress in fuzzing before we take
+		// VMs away for bug reproduction.
+		// TODO: determine the exact moment of corpus triage.
 		select {
+		case <-time.After(15 * time.Minute):
 		case <-ctx.Done():
 			return nil
-		case <-dc.waitCorpusTriage(ctx, corpusTriageToRepro):
-		case <-dc.cfg.TriageDeadline():
-			log.Logf(0, "timed out waiting for coprus triage")
 		}
 		log.Logf(0, "starting bug reproductions")
 		reproLoop.Loop(ctx)
 		return nil
 	})
 
-	g.Go(func() error { return dc.monitorPatchedCoverage(ctx) })
-	g.Go(func() error { return dc.base.Loop(ctx) })
-	g.Go(func() error { return dc.new.Loop(ctx) })
+	g.Go(dc.base.Loop)
+	g.Go(dc.new.Loop)
 
 	runner := &reproRunner{done: make(chan reproRunnerResult, 2), kernel: dc.base}
-	statTimer := time.NewTicker(5 * time.Minute)
+	rareStat := time.NewTicker(5 * time.Minute)
 loop:
 	for {
 		select {
 		case <-ctx.Done():
 			break loop
-		case <-statTimer.C:
+		case <-rareStat.C:
 			vals := make(map[string]int)
 			for _, stat := range stat.Collect(stat.All) {
 				vals[stat.Name] = stat.V
@@ -192,53 +155,31 @@ loop:
 			log.Logf(0, "STAT %s", data)
 		case rep := <-dc.base.crashes:
 			log.Logf(1, "base crash: %v", rep.Title)
-			dc.reportBaseCrash(ctx, rep)
+			dc.store.BaseCrashed(rep.Title, rep.Report)
 		case ret := <-runner.done:
-			// We have run the reproducer on the base instance.
-
-			// A sanity check: the base kernel might have crashed with the same title
-			// since the moment we have stared the reproduction / running on the repro base.
-			ignored := dc.ignoreCrash(ctx, ret.reproReport.Title)
-			if ret.crashReport == nil && ignored {
-				// Report it as error so that we could at least find it in the logs.
-				log.Errorf("resulting crash of an approved repro result is to be ignored: %s",
-					ret.reproReport.Title)
-			} else if ret.crashReport == nil {
-				dc.store.BaseNotCrashed(ret.reproReport.Title)
-				select {
-				case <-ctx.Done():
-				case dc.patchedOnly <- &UniqueBug{
-					Report: ret.reproReport,
-					Repro:  ret.repro,
-				}:
+			if ret.crashReport == nil {
+				dc.store.BaseNotCrashed(ret.origReport.Title)
+				if dc.patchedOnly != nil {
+					dc.patchedOnly <- &UniqueBug{
+						Report: ret.origReport,
+						Repro:  ret.repro,
+					}
 				}
-				log.Logf(0, "patched-only: %s", ret.reproReport.Title)
-				// Now that we know this bug only affects the patch kernel, we can spend more time
-				// generating a minimalistic repro and a C repro.
-				if !ret.fullRepro {
-					reproLoop.Enqueue(&Crash{
-						Report: &report.Report{
-							Title:  ret.reproReport.Title,
-							Output: ret.repro.Prog.Serialize(),
-						},
-						FullRepro: true,
-					})
-				}
+				log.Logf(0, "patched-only: %s", ret.origReport.Title)
 			} else {
-				dc.reportBaseCrash(ctx, ret.crashReport)
-				log.Logf(0, "crashes both: %s / %s", ret.reproReport.Title, ret.crashReport.Title)
+				dc.store.BaseCrashed(ret.origReport.Title, ret.origReport.Report)
+				log.Logf(0, "crashes both: %s / %s", ret.origReport.Title, ret.crashReport.Title)
 			}
 		case ret := <-dc.doneRepro:
-			// We have finished reproducing a crash from the patched instance.
 			if ret.Repro != nil && ret.Repro.Report != nil {
 				origTitle := ret.Crash.Report.Title
 				if ret.Repro.Report.Title == origTitle {
 					origTitle = "-SAME-"
 				}
-				log.Logf(1, "found repro for %q (orig title: %q, reliability: %2.f), took %.2f minutes",
-					ret.Repro.Report.Title, origTitle, ret.Repro.Reliability, ret.Stats.TotalTime.Minutes())
+				log.Logf(1, "found repro for %q (orig title: %q), took %.2f minutes",
+					ret.Repro.Report.Title, origTitle, ret.Stats.TotalTime.Minutes())
 				g.Go(func() error {
-					runner.Run(ctx, ret.Repro, ret.Crash.FullRepro)
+					runner.Run(ctx, ret.Repro)
 					return nil
 				})
 			} else {
@@ -247,7 +188,6 @@ loop:
 			}
 			dc.store.SaveRepro(ret)
 		case rep := <-dc.new.crashes:
-			// A new crash is found on the patched instance.
 			crash := &Crash{Report: rep}
 			need := dc.NeedRepro(crash)
 			log.Logf(0, "patched crashed: %v [need repro = %v]",
@@ -261,144 +201,39 @@ loop:
 	return g.Wait()
 }
 
-func (dc *diffContext) ignoreCrash(ctx context.Context, title string) bool {
-	if dc.store.EverCrashedBase(title) {
-		return true
-	}
-	// Let's try to ask the external systems about it as well.
-	if dc.cfg.IgnoreCrash != nil {
-		ignore, err := dc.cfg.IgnoreCrash(ctx, title)
-		if err != nil {
-			log.Logf(0, "a call to IgnoreCrash failed: %v", err)
-		} else {
-			if ignore {
-				log.Logf(0, "base crash %q is to be ignored", title)
-			}
-			return ignore
-		}
-	}
-	return false
-}
-
-func (dc *diffContext) reportBaseCrash(ctx context.Context, rep *report.Report) {
-	dc.store.BaseCrashed(rep.Title, rep.Report)
-	if dc.cfg.BaseCrashes == nil {
-		return
-	}
-	select {
-	case dc.cfg.BaseCrashes <- rep.Title:
-	case <-ctx.Done():
-	}
-}
-
-func (dc *diffContext) waitCorpusTriage(ctx context.Context, threshold float64) chan struct{} {
-	const backOffTime = 30 * time.Second
-	ret := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-time.After(backOffTime):
-			case <-ctx.Done():
-				return
-			}
-			triaged := dc.new.triageProgress()
-			if triaged >= threshold {
-				log.Logf(0, "triaged %.1f%% of the corpus", triaged*100.0)
-				close(ret)
-				return
-			}
-		}
-	}()
-	return ret
-}
-
-var ErrPatchedAreaNotReached = errors.New("fuzzer has not reached the patched area")
-
-func (dc *diffContext) monitorPatchedCoverage(ctx context.Context) error {
-	if dc.cfg.FuzzToReachPatched == 0 {
-		// The feature is disabled.
-		return nil
-	}
-
-	// First wait until we have almost triaged all of the corpus.
-	select {
-	case <-ctx.Done():
-		return nil
-	case <-dc.waitCorpusTriage(ctx, corpusTriageToMonitor):
-	}
-
-	// By this moment, we must have coverage filters already filled out.
-	focusPCs := 0
-	// The last one is "everything else", so it's not of interest.
-	coverFilters := dc.new.coverFilters
-	for i := 0; i < len(coverFilters.Areas)-1; i++ {
-		focusPCs += len(coverFilters.Areas[i].CoverPCs)
-	}
-	if focusPCs == 0 {
-		// No areas were configured.
-		log.Logf(1, "no PCs in the areas of focused fuzzing, skipping the zero patched coverage check")
-		return nil
-	}
-
-	// Then give the fuzzer some change to get through.
-	select {
-	case <-time.After(dc.cfg.FuzzToReachPatched):
-	case <-ctx.Done():
-		return nil
-	}
-	focusAreaStats := dc.new.progsPerArea()
-	if focusAreaStats[symbolsArea]+focusAreaStats[filesArea]+focusAreaStats[includesArea] > 0 {
-		log.Logf(0, "fuzzer has reached the modified code (%d + %d + %d), continuing fuzzing",
-			focusAreaStats[symbolsArea], focusAreaStats[filesArea], focusAreaStats[includesArea])
-		return nil
-	}
-	log.Logf(0, "fuzzer has not reached the modified code in %s, aborting",
-		dc.cfg.FuzzToReachPatched)
-	return ErrPatchedAreaNotReached
-}
-
 // TODO: instead of this limit, consider expotentially growing delays between reproduction attempts.
 const maxReproAttempts = 6
 
-func needReproForTitle(title string) bool {
-	if strings.Contains(title, "no output") ||
-		strings.Contains(title, "lost connection") ||
-		strings.Contains(title, "detected stall") ||
-		strings.Contains(title, "SYZ") {
+func (dc *diffContext) NeedRepro(crash *Crash) bool {
+	if strings.Contains(crash.Title, "no output") ||
+		strings.Contains(crash.Title, "lost connection") ||
+		strings.Contains(crash.Title, "stall") ||
+		strings.Contains(crash.Title, "SYZ") {
 		// Don't waste time reproducing these.
+		return false
+	}
+	dc.mu.Lock()
+	defer dc.mu.Unlock()
+	if dc.store.EverCrashedBase(crash.Title) {
+		return false
+	}
+	if dc.reproAttempts[crash.Title] > maxReproAttempts {
 		return false
 	}
 	return true
 }
 
-func (dc *diffContext) NeedRepro(crash *Crash) bool {
-	if crash.FullRepro {
-		return true
-	}
-	if !needReproForTitle(crash.Title) {
-		return false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	if dc.ignoreCrash(ctx, crash.Title) {
-		return false
-	}
-	dc.mu.Lock()
-	defer dc.mu.Unlock()
-	return dc.reproAttempts[crash.Title] <= maxReproAttempts
-}
-
-func (dc *diffContext) RunRepro(ctx context.Context, crash *Crash) *ReproResult {
+func (dc *diffContext) RunRepro(crash *Crash) *ReproResult {
 	dc.mu.Lock()
 	dc.reproAttempts[crash.Title]++
 	dc.mu.Unlock()
 
-	res, stats, err := repro.Run(ctx, crash.Output, repro.Environment{
+	res, stats, err := repro.Run(context.Background(), crash.Output, repro.Environment{
 		Config:   dc.new.cfg,
 		Features: dc.new.features,
 		Reporter: dc.new.reporter,
 		Pool:     dc.new.pool,
-		Fast:     !crash.FullRepro,
+		Fast:     true,
 	})
 	if res != nil && res.Report != nil {
 		dc.mu.Lock()
@@ -411,11 +246,7 @@ func (dc *diffContext) RunRepro(ctx context.Context, crash *Crash) *ReproResult 
 		Stats: stats,
 		Err:   err,
 	}
-	select {
-	case dc.doneRepro <- ret:
-	case <-ctx.Done():
-		// If the context is cancelled, no one may be listening on doneRepro.
-	}
+	dc.doneRepro <- ret
 	return ret
 }
 
@@ -436,8 +267,6 @@ type kernelContext struct {
 	pool       *vm.Dispatcher
 	features   flatrpc.Feature
 	candidates chan []fuzzer.Candidate
-	// Once candidates is assigned, candidatesCount holds their original count.
-	candidatesCount atomic.Int64
 
 	coverFilters    CoverageFilters
 	reportGenerator *ReportGeneratorWrapper
@@ -447,12 +276,13 @@ type kernelContext struct {
 	duplicateInto queue.Executor
 }
 
-func setup(name string, cfg *mgrconfig.Config, debug bool) (*kernelContext, error) {
+func setup(ctx context.Context, name string, cfg *mgrconfig.Config, debug bool) (*kernelContext, error) {
 	osutil.MkdirAll(cfg.Workdir)
 
 	kernelCtx := &kernelContext{
 		name:            name,
 		debug:           debug,
+		ctx:             ctx,
 		cfg:             cfg,
 		crashes:         make(chan *report.Report, 128),
 		candidates:      make(chan []fuzzer.Candidate),
@@ -485,39 +315,17 @@ func setup(name string, cfg *mgrconfig.Config, debug bool) (*kernelContext, erro
 	return kernelCtx, nil
 }
 
-func (kc *kernelContext) Loop(baseCtx context.Context) error {
-	defer log.Logf(1, "%s: kernel context loop terminated", kc.name)
-
+func (kc *kernelContext) Loop() error {
 	if err := kc.serv.Listen(); err != nil {
 		return fmt.Errorf("failed to start rpc server: %w", err)
 	}
-	eg, ctx := errgroup.WithContext(baseCtx)
-	kc.ctx = ctx
+	eg, ctx := errgroup.WithContext(kc.ctx)
 	eg.Go(func() error {
-		defer log.Logf(1, "%s: rpc server terminaled", kc.name)
 		return kc.serv.Serve(ctx)
 	})
 	eg.Go(func() error {
-		defer log.Logf(1, "%s: pool terminated", kc.name)
 		kc.pool.Loop(ctx)
 		return nil
-	})
-	eg.Go(func() error {
-		for {
-			select {
-			case <-ctx.Done():
-				return nil
-			case err := <-kc.pool.BootErrors:
-				title := "unknown"
-				var bootErr vm.BootErrorer
-				if errors.As(err, &bootErr) {
-					title, _ = bootErr.BootError()
-				}
-				// Boot errors are not useful for patch fuzzing (at least yet).
-				// Fetch them to not block the channel and print them to the logs.
-				log.Logf(0, "%s: boot error: %s", kc.name, title)
-			}
-		}
 	})
 	return eg.Wait()
 }
@@ -557,8 +365,9 @@ func (kc *kernelContext) setupFuzzer(features flatrpc.Feature, syscalls map[*pro
 	fuzzerObj := fuzzer.NewFuzzer(kc.ctx, &fuzzer.Config{
 		Corpus:   corpusObj,
 		Coverage: kc.cfg.Cover,
-		// Fault injection may bring instaibility into bug reproducibility, which may lead to false positives.
-		FaultInjection: false,
+		// TODO: it may be unstable between different revisions though.
+		// For now it's only kept true because it seems to increase repro chances in local runs (???).
+		FaultInjection: true,
 		Comparisons:    features&flatrpc.FeatureComparisons != 0,
 		Collide:        true,
 		EnabledCalls:   syscalls,
@@ -571,6 +380,7 @@ func (kc *kernelContext) setupFuzzer(features flatrpc.Feature, syscalls map[*pro
 			log.Logf(level, msg, args...)
 		},
 	}, rnd, kc.cfg.Target)
+	kc.fuzzer.Store(fuzzerObj)
 
 	if kc.http != nil {
 		kc.http.Fuzzer.Store(fuzzerObj)
@@ -585,9 +395,6 @@ func (kc *kernelContext) setupFuzzer(features flatrpc.Feature, syscalls map[*pro
 		// The loop will be aborted later.
 		break
 	}
-	// We assign kc.fuzzer after kc.candidatesCount to simplify the triageProgress implementation.
-	kc.candidatesCount.Store(int64(len(candidates)))
-	kc.fuzzer.Store(fuzzerObj)
 
 	filtered := FilterCandidates(candidates, syscalls, false).Candidates
 	log.Logf(0, "%s: adding %d seeds", kc.name, len(filtered))
@@ -620,11 +427,7 @@ func (kc *kernelContext) CoverageFilter(modules []*vminfo.KernelModule) ([]uint6
 		return nil, fmt.Errorf("failed to init coverage filter: %w", err)
 	}
 	kc.coverFilters = filters
-	for _, area := range filters.Areas {
-		log.Logf(0, "area %q: %d PCs in the cover filter",
-			area.Name, len(area.CoverPCs))
-	}
-	log.Logf(0, "executor cover filter: %d PCs", len(filters.ExecutorFilter))
+	log.Logf(0, "cover filter size: %d", len(filters.ExecutorFilter))
 	if kc.http != nil {
 		kc.http.Cover.Store(&CoverageInfo{
 			Modules:         modules,
@@ -647,10 +450,7 @@ func (kc *kernelContext) fuzzerInstance(ctx context.Context, inst *vm.Instance, 
 	lastExec, _ := kc.serv.ShutdownInstance(index, rep != nil)
 	if rep != nil {
 		rpcserver.PrependExecuting(rep, lastExec)
-		select {
-		case kc.crashes <- rep:
-		case <-ctx.Done():
-		}
+		kc.crashes <- rep
 	}
 	if err != nil {
 		log.Errorf("#%d run failed: %s", inst.Index(), err)
@@ -672,43 +472,16 @@ func (kc *kernelContext) runInstance(ctx context.Context, inst *vm.Instance,
 		return nil, fmt.Errorf("failed to parse manager's address")
 	}
 	cmd := fmt.Sprintf("%v runner %v %v %v", executorBin, inst.Index(), host, port)
-	ctxTimeout, cancel := context.WithTimeout(ctx, kc.cfg.Timeouts.VMRunningTime)
-	defer cancel()
-	_, reps, err := inst.Run(ctxTimeout, kc.reporter, cmd,
-		vm.WithExitCondition(vm.ExitTimeout),
-		vm.WithInjectExecuting(injectExec),
-		vm.WithEarlyFinishCb(func() {
+	_, rep, err := inst.Run(kc.cfg.Timeouts.VMRunningTime, kc.reporter, cmd,
+		vm.ExitTimeout, vm.StopContext(ctx), vm.InjectExecuting(injectExec),
+		vm.EarlyFinishCb(func() {
 			// Depending on the crash type and kernel config, fuzzing may continue
 			// running for several seconds even after kernel has printed a crash report.
 			// This litters the log and we want to prevent it.
 			kc.serv.StopFuzzing(inst.Index())
 		}),
 	)
-	if len(reps) > 0 {
-		return reps[0], err
-	}
-	return nil, err
-}
-
-func (kc *kernelContext) triageProgress() float64 {
-	fuzzer := kc.fuzzer.Load()
-	if fuzzer == nil {
-		return 0
-	}
-	total := kc.candidatesCount.Load()
-	if total == 0.0 {
-		// There were no candidates in the first place.
-		return 1
-	}
-	return 1.0 - float64(fuzzer.CandidatesToTriage())/float64(total)
-}
-
-func (kc *kernelContext) progsPerArea() map[string]int {
-	fuzzer := kc.fuzzer.Load()
-	if fuzzer == nil {
-		return nil
-	}
-	return fuzzer.Config.Corpus.ProgsPerArea()
+	return rep, err
 }
 
 // reproRunner is used to run reproducers on the base kernel to determine whether it is affected.
@@ -719,36 +492,12 @@ type reproRunner struct {
 }
 
 type reproRunnerResult struct {
-	reproReport *report.Report
+	origReport  *report.Report
 	crashReport *report.Report
 	repro       *repro.Result
-	fullRepro   bool // whether this was a full reproduction
 }
 
-const (
-	// We want to avoid false positives as much as possible, so let's use
-	// a stricter relibability cut-off than what's used inside pkg/repro.
-	reliabilityCutOff = 0.4
-	// 80% reliability x 3 runs is a 0.8% chance of false positives.
-	// 6 runs at 40% reproducibility gives a ~4% false positive chance.
-	reliabilityThreshold = 0.8
-)
-
-// Run executes the reproducer 3 times with slightly different options.
-// The objective is to verify whether the bug triggered by the reproducer affects the base kernel.
-// To avoid reporting false positives, the function does not require the kernel to crash with exactly
-// the same crash title as in the original crash report. Any single crash is accepted.
-// The result is sent back over the rr.done channel.
-func (rr *reproRunner) Run(ctx context.Context, r *repro.Result, fullRepro bool) {
-	if r.Reliability < reliabilityCutOff {
-		log.Logf(1, "%s: repro is too unreliable, skipping", r.Report.Title)
-		return
-	}
-	needRuns := 3
-	if r.Reliability < reliabilityThreshold {
-		needRuns = 6
-	}
-
+func (rr *reproRunner) Run(ctx context.Context, r *repro.Result) {
 	pool := rr.kernel.pool
 	cnt := int(rr.running.Add(1))
 	pool.ReserveForRun(min(cnt, pool.Total()))
@@ -757,21 +506,19 @@ func (rr *reproRunner) Run(ctx context.Context, r *repro.Result, fullRepro bool)
 		rr.kernel.pool.ReserveForRun(min(cnt, pool.Total()))
 	}()
 
-	ret := reproRunnerResult{reproReport: r.Report, repro: r, fullRepro: fullRepro}
-	for doneRuns := 0; doneRuns < needRuns; {
-		if ctx.Err() != nil {
-			return
-		}
+	ret := reproRunnerResult{origReport: r.Report, repro: r}
+
+	var result *instance.RunResult
+	var err error
+	for i := 0; i < 3; i++ {
 		opts := r.Opts
 		opts.Repeat = true
-		if doneRuns%3 != 2 {
+		if i == 0 || i == 1 {
 			// Two times out of 3, test with Threaded=true.
-			// The third time we leave it as it was in the reproducer (in case it was important).
+			// The third time we leave it as is in case it was important.
 			opts.Threaded = true
 		}
-		var err error
-		var result *instance.RunResult
-		runErr := pool.Run(ctx, func(ctx context.Context, inst *vm.Instance, updInfo dispatcher.UpdateInfo) {
+		pool.Run(func(ctx context.Context, inst *vm.Instance, updInfo dispatcher.UpdateInfo) {
 			var ret *instance.ExecProgInstance
 			ret, err = instance.SetupExecProg(inst, rr.kernel.cfg, rr.kernel.reporter, nil)
 			if err != nil {
@@ -783,23 +530,16 @@ func (rr *reproRunner) Run(ctx context.Context, r *repro.Result, fullRepro bool)
 				Opts:     opts,
 			})
 		})
-		logPrefix := fmt.Sprintf("attempt #%d to run %q on base", doneRuns, ret.reproReport.Title)
-		if errors.Is(runErr, context.Canceled) {
-			// Just exit without sending anything over the channel.
-			log.Logf(1, "%s: aborting due to context cancelation", logPrefix)
-			return
-		} else if runErr != nil || err != nil {
-			log.Logf(1, "%s: skipping due to errors: %v / %v", logPrefix, runErr, err)
-			continue
-		}
-		doneRuns++
-		if result != nil && result.Report != nil {
-			log.Logf(1, "%s: crashed with %s", logPrefix, result.Report.Title)
+		crashed := result != nil && result.Report != nil
+		log.Logf(1, "attempt #%d to run %q on base: crashed=%v", i, ret.origReport.Title, crashed)
+		if crashed {
 			ret.crashReport = result.Report
 			break
-		} else {
-			log.Logf(1, "%s: did not crash", logPrefix)
 		}
+	}
+	if err != nil {
+		log.Errorf("failed to run repro: %v", err)
+		return
 	}
 	select {
 	case rr.done <- ret:
@@ -807,33 +547,14 @@ func (rr *reproRunner) Run(ctx context.Context, r *repro.Result, fullRepro bool)
 	}
 }
 
-const (
-	symbolsArea  = "symbols"
-	filesArea    = "files"
-	includesArea = "included"
-)
-
-func PatchFocusAreas(cfg *mgrconfig.Config, gitPatches [][]byte, baseHashes, patchedHashes map[string]string) {
-	funcs := modifiedSymbols(baseHashes, patchedHashes)
-	if len(funcs) > 0 {
-		log.Logf(0, "adding modified_functions to focus areas: %q", funcs)
-		cfg.Experimental.FocusAreas = append(cfg.Experimental.FocusAreas,
-			mgrconfig.FocusArea{
-				Name: symbolsArea,
-				Filter: mgrconfig.CovFilterCfg{
-					Functions: funcs,
-				},
-				Weight: 6.0,
-			})
-	}
-
+func PatchFocusAreas(cfg *mgrconfig.Config, gitPatches [][]byte) {
 	direct, transitive := affectedFiles(cfg, gitPatches)
 	if len(direct) > 0 {
 		sort.Strings(direct)
-		log.Logf(0, "adding directly modified files to focus areas: %q", direct)
+		log.Logf(0, "adding directly modified files to focus_order: %q", direct)
 		cfg.Experimental.FocusAreas = append(cfg.Experimental.FocusAreas,
 			mgrconfig.FocusArea{
-				Name: filesArea,
+				Name: "modified",
 				Filter: mgrconfig.CovFilterCfg{
 					Files: direct,
 				},
@@ -843,10 +564,10 @@ func PatchFocusAreas(cfg *mgrconfig.Config, gitPatches [][]byte, baseHashes, pat
 
 	if len(transitive) > 0 {
 		sort.Strings(transitive)
-		log.Logf(0, "adding transitively affected to focus areas: %q", transitive)
+		log.Logf(0, "adding transitively affected to focus_order: %q", transitive)
 		cfg.Experimental.FocusAreas = append(cfg.Experimental.FocusAreas,
 			mgrconfig.FocusArea{
-				Name: includesArea,
+				Name: "included",
 				Filter: mgrconfig.CovFilterCfg{
 					Files: transitive,
 				},
@@ -875,21 +596,25 @@ func affectedFiles(cfg *mgrconfig.Config, gitPatches [][]byte) (direct, transiti
 	for _, file := range allFiles {
 		directMap[file] = struct{}{}
 		if strings.HasSuffix(file, ".h") && cfg.KernelSrc != "" {
-			// For .h files, we want to determine all the .c files that include them.
 			// Ideally, we should combine this with the recompilation process - then we know
 			// exactly which files were affected by the patch.
-			matching, err := osutil.GrepFiles(cfg.KernelSrc, `.c`,
-				[]byte(`<`+strings.TrimPrefix(file, "include/")+`>`))
+			out, err := osutil.RunCmd(time.Minute, cfg.KernelSrc, "/usr/bin/grep",
+				"-rl", "--include", `*.c`, `<`+strings.TrimPrefix(file, "include/")+`>`)
 			if err != nil {
-				log.Logf(0, "failed to grep for includes: %s", err)
+				log.Logf(0, "failed to grep for the header usages: %v", err)
 				continue
 			}
-			if len(matching) >= maxAffectedByHeader {
+			lines := strings.Split(string(out), "\n")
+			if len(lines) >= maxAffectedByHeader {
 				// It's too widespread. It won't help us focus on anything.
-				log.Logf(0, "the header %q is included in too many files (%d)", file, len(matching))
+				log.Logf(0, "the header %q is included in too many files (%d)", file, len(lines))
 				continue
 			}
-			for _, name := range matching {
+			for _, name := range lines {
+				name = strings.TrimSpace(name)
+				if name == "" {
+					continue
+				}
 				transitiveMap[name] = struct{}{}
 			}
 		}
@@ -904,22 +629,4 @@ func affectedFiles(cfg *mgrconfig.Config, gitPatches [][]byte) (direct, transiti
 		transitive = append(transitive, name)
 	}
 	return
-}
-
-// If there are too many different symbols, they are no longer specific enough.
-// Don't use them to focus the fuzzer.
-const modifiedSymbolThreshold = 0.05
-
-func modifiedSymbols(baseHashes, patchedHashes map[string]string) []string {
-	var ret []string
-	for name, hash := range patchedHashes {
-		if baseHash, ok := baseHashes[name]; !ok || baseHash != hash {
-			ret = append(ret, name)
-			if float64(len(ret)) > float64(len(patchedHashes))*modifiedSymbolThreshold {
-				return nil
-			}
-		}
-	}
-	sort.Strings(ret)
-	return ret
 }

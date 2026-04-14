@@ -6,7 +6,6 @@
 package instance
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -315,7 +314,7 @@ type EnvTestResult struct {
 }
 
 func (inst *inst) test() EnvTestResult {
-	vmInst, err := inst.vmPool.Create(context.Background(), inst.vmIndex)
+	vmInst, err := inst.vmPool.Create(inst.vmIndex)
 	if err != nil {
 		testErr := &TestError{
 			Boot:  true,
@@ -455,22 +454,21 @@ func (inst *inst) csourceOptions() (csource.Options, error) {
 		return opts, err
 	}
 	// Combine repro options and default options in a way that increases chances to reproduce the crash.
-	// We always enable threaded/collide as it should be [almost] strictly better.
+	// First, we always enable threaded/collide as it should be [almost] strictly better.
+	// Executor does not support empty sandbox, so we use none instead.
+	// Finally, always use repeat and multiple procs.
+	if opts.Sandbox == "" {
+		opts.Sandbox = "none"
+	}
 	opts.Repeat, opts.Threaded = true, true
 	return opts, nil
 }
 
-// nolint:revive
 func ExecprogCmd(execprog, executor, OS, arch, vmType string, opts csource.Options,
 	optionalFlags bool, slowdown int, progFile string) string {
 	repeatCount := 1
 	if opts.Repeat {
 		repeatCount = 0
-	}
-	sandbox := opts.Sandbox
-	if sandbox == "" {
-		// Executor does not support empty sandbox, so we use none instead.
-		sandbox = "none"
 	}
 	osArg := ""
 	if targets.Get(OS, arch).HostFuzzer {
@@ -484,13 +482,13 @@ func ExecprogCmd(execprog, executor, OS, arch, vmType string, opts csource.Optio
 	if optionalFlags {
 		optionalArg += " " + tool.OptionalFlags([]tool.Flag{
 			{Name: "slowdown", Value: fmt.Sprint(slowdown)},
-			{Name: "sandbox_arg", Value: fmt.Sprint(opts.SandboxArg)},
+			{Name: "sandboxArg", Value: fmt.Sprint(opts.SandboxArg)},
 			{Name: "type", Value: fmt.Sprint(vmType)},
 		})
 	}
 	return fmt.Sprintf("%v -executor=%v -arch=%v%v -sandbox=%v"+
 		" -procs=%v -repeat=%v -threaded=%v -collide=%v -cover=0%v %v",
-		execprog, executor, arch, osArg, sandbox,
+		execprog, executor, arch, osArg, opts.Sandbox,
 		opts.Procs, repeatCount, opts.Threaded, opts.Collide,
 		optionalArg, progFile)
 }
@@ -502,7 +500,6 @@ var MakeBin = func() string {
 	return "make"
 }()
 
-// nolint:revive
 func RunnerCmd(prog, fwdAddr, os, arch string, poolIdx, vmIdx int, threaded, newEnv bool) string {
 	return fmt.Sprintf("%s -addr=%s -os=%s -arch=%s -pool=%d -vm=%d "+
 		"-threaded=%t -new-env=%t", prog, fwdAddr, os, arch, poolIdx, vmIdx, threaded, newEnv)
@@ -565,12 +562,6 @@ func RunSmokeTest(cfg *mgrconfig.Config) (*report.Report, error) {
 	reportData, err := os.ReadFile(filepath.Join(cfg.Workdir, "report.json"))
 	if err != nil {
 		if os.IsNotExist(err) {
-			var verboseErr *osutil.VerboseError
-			if errors.As(retErr, &verboseErr) {
-				// Include more details into the report.
-				prefix := fmt.Sprintf("%s, exit code %d\n\n", verboseErr, verboseErr.ExitCode)
-				output = append([]byte(prefix), output...)
-			}
 			rep := &report.Report{
 				Title:  "SYZFATAL: image testing failed w/o kernel bug",
 				Output: output,

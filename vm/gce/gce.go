@@ -70,13 +70,15 @@ type Pool struct {
 }
 
 type instance struct {
-	env   *vmimpl.Env
-	cfg   *Config
-	GCE   *gce.Context
-	debug bool
-	name  string
-	vmimpl.SSHOptions
+	env            *vmimpl.Env
+	cfg            *Config
+	GCE            *gce.Context
+	debug          bool
+	name           string
+	ip             string
 	gceKey         string // per-instance private ssh key associated with the instance
+	sshKey         string // ssh key
+	sshUser        string
 	closed         chan bool
 	consolew       io.WriteCloser
 	consoleReadCmd string // optional: command to read non-standard kernel console
@@ -135,7 +137,7 @@ func Ctor(env *vmimpl.Env, consoleReadCmd string) (*Pool, error) {
 		if err := GCE.DeleteImage(cfg.GCEImage); err != nil {
 			return nil, fmt.Errorf("failed to delete GCE image: %w", err)
 		}
-		if err := GCE.CreateImage(cfg.GCEImage, gcsImage, env.OS); err != nil {
+		if err := GCE.CreateImage(cfg.GCEImage, gcsImage); err != nil {
 			return nil, fmt.Errorf("failed to create GCE image: %w", err)
 		}
 	}
@@ -176,7 +178,7 @@ func (pool *Pool) Count() int {
 	return pool.cfg.Count
 }
 
-func (pool *Pool) Create(_ context.Context, workdir string, index int) (vmimpl.Instance, error) {
+func (pool *Pool) Create(workdir string, index int) (vmimpl.Instance, error) {
 	name := fmt.Sprintf("%v-%v", pool.env.Name, index)
 	// Create SSH key for the instance.
 	gceKey := filepath.Join(workdir, "key")
@@ -215,26 +217,21 @@ func (pool *Pool) Create(_ context.Context, workdir string, index int) (vmimpl.I
 	}
 	log.Logf(0, "wait instance to boot: %v (%v)", name, ip)
 	inst := &instance{
-		env:   pool.env,
-		cfg:   pool.cfg,
-		debug: pool.env.Debug,
-		GCE:   pool.GCE,
-		name:  name,
-		SSHOptions: vmimpl.SSHOptions{
-			Addr: ip,
-			Port: 22,
-			Key:  sshKey,
-			User: sshUser,
-		},
-
-		gceKey: gceKey,
-
+		env:            pool.env,
+		cfg:            pool.cfg,
+		debug:          pool.env.Debug,
+		GCE:            pool.GCE,
+		name:           name,
+		ip:             ip,
+		gceKey:         gceKey,
+		sshKey:         sshKey,
+		sshUser:        sshUser,
 		closed:         make(chan bool),
 		consoleReadCmd: pool.consoleReadCmd,
 		timeouts:       pool.env.Timeouts,
 	}
-	if err := vmimpl.WaitForSSH(5*time.Minute, inst.SSHOptions,
-		pool.env.OS, nil, false, pool.env.Debug); err != nil {
+	if err := vmimpl.WaitForSSH(pool.env.Debug, 5*time.Minute, ip,
+		sshKey, sshUser, pool.env.OS, 22, nil, false); err != nil {
 		output, outputErr := inst.getSerialPortOutput()
 		if outputErr != nil {
 			output = []byte(fmt.Sprintf("failed to get boot output: %v", outputErr))
@@ -263,15 +260,14 @@ func (inst *instance) Forward(port int) (string, error) {
 
 func (inst *instance) Copy(hostSrc string) (string, error) {
 	vmDst := "./" + filepath.Base(hostSrc)
-	args := append(vmimpl.SCPArgs(true, inst.Key, inst.Port, false),
-		hostSrc, inst.User+"@"+inst.Addr+":"+vmDst)
+	args := append(vmimpl.SCPArgs(true, inst.sshKey, 22, false), hostSrc, inst.sshUser+"@"+inst.ip+":"+vmDst)
 	if err := runCmd(inst.debug, "scp", args...); err != nil {
 		return "", err
 	}
 	return vmDst, nil
 }
 
-func (inst *instance) Run(ctx context.Context, command string) (
+func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command string) (
 	<-chan []byte, <-chan error, error) {
 	conRpipe, conWpipe, err := osutil.LongPipe()
 	if err != nil {
@@ -340,8 +336,9 @@ func (inst *instance) Run(ctx context.Context, command string) (
 	sshWpipe.Close()
 	merger.Add("ssh", sshRpipe)
 
-	return vmimpl.Multiplex(ctx, ssh, merger, vmimpl.MultiplexConfig{
+	return vmimpl.Multiplex(ssh, merger, timeout, vmimpl.MultiplexConfig{
 		Console: vmimpl.CmdCloser{Cmd: con},
+		Stop:    stop,
 		Close:   inst.closed,
 		Debug:   inst.debug,
 		Scale:   inst.timeouts.Scale,
@@ -419,8 +416,8 @@ func (inst *instance) ssh(args ...string) ([]byte, error) {
 }
 
 func (inst *instance) sshArgs(args ...string) []string {
-	sshArgs := append(vmimpl.SSHArgs(inst.debug, inst.Key, 22, false), inst.User+"@"+inst.Addr)
-	if inst.env.OS == targets.Linux && inst.User != "root" {
+	sshArgs := append(vmimpl.SSHArgs(inst.debug, inst.sshKey, 22, false), inst.sshUser+"@"+inst.ip)
+	if inst.env.OS == targets.Linux && inst.sshUser != "root" {
 		args = []string{"sudo", "bash", "-c", "'" + strings.Join(args, " ") + "'"}
 	}
 	return append(sshArgs, args...)

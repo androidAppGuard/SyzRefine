@@ -97,12 +97,8 @@ func TestReproOrder(t *testing.T) {
 }
 
 func TestReproRWRace(t *testing.T) {
-	var reproProgExist atomic.Bool
 	mock := &reproMgrMock{
 		run: make(chan runCallback),
-		needReproCb: func(_ *Crash) bool {
-			return !reproProgExist.Load()
-		},
 	}
 	obj := NewReproLoop(mock, 3, false)
 
@@ -118,7 +114,7 @@ func TestReproRWRace(t *testing.T) {
 	called := <-mock.run
 	// Pretend that processRepro() is finished and
 	// we've written "repro.prog" to the disk.
-	reproProgExist.Store(true)
+	mock.reproProgExist.Store(true)
 	assert.False(t, mock.NeedRepro(nil))
 	called.ret <- &ReproResult{}
 	assert.True(t, obj.CanReproMore())
@@ -127,60 +123,10 @@ func TestReproRWRace(t *testing.T) {
 	mock.onVMShutdown(t, obj)
 }
 
-func TestCancelRunningRepro(t *testing.T) {
-	mock := &reproMgrMock{
-		run: make(chan runCallback),
-	}
-	obj := NewReproLoop(mock, 1, false)
-	ctx, done := context.WithCancel(context.Background())
-	complete := make(chan struct{})
-	go func() {
-		obj.Loop(ctx)
-		close(complete)
-	}()
-
-	defer func() {
-		<-complete
-	}()
-
-	obj.Enqueue(&Crash{Report: &report.Report{Title: "A"}})
-	obj.Enqueue(&Crash{Report: &report.Report{Title: "B"}})
-	<-mock.run
-	done()
-}
-
-func TestEnqueueTriggersRepro(t *testing.T) {
-	mock := &reproMgrMock{
-		run: make(chan runCallback),
-		needReproCb: func(crash *Crash) bool {
-			return crash.FullTitle() == "C"
-		},
-	}
-	obj := NewReproLoop(mock, 1, false)
-	obj.Enqueue(&Crash{Report: &report.Report{Title: "A"}, Manual: true})
-	obj.Enqueue(&Crash{Report: &report.Report{Title: "B"}, Manual: true})
-	obj.Enqueue(&Crash{Report: &report.Report{Title: "C"}})
-
-	ctx, done := context.WithCancel(context.Background())
-	complete := make(chan struct{})
-	go func() {
-		obj.Loop(ctx)
-		close(complete)
-	}()
-
-	defer func() {
-		<-complete
-	}()
-	// The test will hang if the loop never picks up the title C.
-	crash := <-mock.run
-	assert.Equal(t, "C", crash.crash.FullTitle())
-	done()
-}
-
 type reproMgrMock struct {
-	reserved    atomic.Int64
-	run         chan runCallback
-	needReproCb func(*Crash) bool
+	reserved       atomic.Int64
+	run            chan runCallback
+	reproProgExist atomic.Bool
 }
 
 type runCallback struct {
@@ -201,28 +147,16 @@ func (m *reproMgrMock) onVMShutdown(t *testing.T, reproLoop *ReproLoop) {
 	t.Fatal("reserved VMs must have dropped to 0")
 }
 
-func (m *reproMgrMock) RunRepro(ctx context.Context, crash *Crash) *ReproResult {
+func (m *reproMgrMock) RunRepro(crash *Crash) *ReproResult {
 	retCh := make(chan *ReproResult)
-	select {
-	case m.run <- runCallback{crash: crash, ret: retCh}:
-	case <-ctx.Done():
-		return &ReproResult{}
-	}
-	var ret *ReproResult
-	select {
-	case ret = <-retCh:
-	case <-ctx.Done():
-		return &ReproResult{}
-	}
+	m.run <- runCallback{crash: crash, ret: retCh}
+	ret := <-retCh
 	close(retCh)
 	return ret
 }
 
 func (m *reproMgrMock) NeedRepro(crash *Crash) bool {
-	if m.needReproCb != nil {
-		return m.needReproCb(crash)
-	}
-	return true
+	return !m.reproProgExist.Load()
 }
 
 func (m *reproMgrMock) ResizeReproPool(VMs int) {

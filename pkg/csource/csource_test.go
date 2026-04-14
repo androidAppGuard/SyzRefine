@@ -43,15 +43,16 @@ func TestGenerate(t *testing.T) {
 			continue
 		}
 		t.Run(target.OS+"/"+target.Arch, func(t *testing.T) {
+			full := !checked[target.OS]
+			if !full && testing.Short() {
+				return
+			}
 			if err := sysTarget.BrokenCompiler; err != "" {
 				t.Skipf("target compiler is broken: %v", err)
 			}
-			full := !checked[target.OS]
-			if full || !testing.Short() {
-				checked[target.OS] = true
-				t.Parallel()
-				testTarget(t, target, full)
-			}
+			checked[target.OS] = true
+			t.Parallel()
+			testTarget(t, target, full)
 			testPseudoSyscalls(t, target)
 		})
 	}
@@ -140,11 +141,6 @@ func testOne(t *testing.T, p *prog.Prog, opts Options) {
 		t.Logf("opts: %+v\nprogram:\n%s", opts, p.Serialize())
 		t.Fatalf("%v", err)
 	}
-	// Executor headers are embedded into the C source. Make sure there are no leftover include guards.
-	if matches := regexp.MustCompile(`(?m)^#define\s+\S+_H\s*\n`).FindAllString(string(src), -1); len(matches) > 0 {
-		t.Fatalf("source contains leftover include guards: %v\nopts: %+v\nprogram:\n%s",
-			matches, opts, p.Serialize())
-	}
 	bin, err := Build(p.Target, src)
 	if err != nil {
 		if atomic.AddUint32(&failedTests, 1) > maxFailures {
@@ -179,21 +175,13 @@ func TestExecutorMacros(t *testing.T) {
 
 func TestSource(t *testing.T) {
 	t.Parallel()
-
-	target32, err := prog.GetTarget(targets.TestOS, targets.TestArch32)
+	target, err := prog.GetTarget(targets.TestOS, targets.TestArch64)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	target64, err := prog.GetTarget(targets.TestOS, targets.TestArch64)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	type Test struct {
 		input  string
 		output string
-		target *prog.Target // target64 by default.
 	}
 	tests := []Test{
 		{
@@ -228,11 +216,11 @@ syscall(SYS_csource5, /*buf=*/0x%xul);
 NONFAILING(memcpy((void*)0x%x, "101010101010", 12));
 syscall(SYS_csource6, /*buf=*/0x%xul);
 `,
-				target64.DataOffset+0x40, target64.DataOffset+0x40,
-				target64.DataOffset+0x80, target64.DataOffset+0x80,
-				target64.DataOffset+0xc0, target64.DataOffset+0xc0,
-				target64.DataOffset+0x100, target64.DataOffset+0x100,
-				target64.DataOffset+0x140, target64.DataOffset+0x140),
+				target.DataOffset+0x40, target.DataOffset+0x40,
+				target.DataOffset+0x80, target.DataOffset+0x80,
+				target.DataOffset+0xc0, target.DataOffset+0xc0,
+				target.DataOffset+0x100, target.DataOffset+0x100,
+				target.DataOffset+0x140, target.DataOffset+0x140),
 		},
 		{
 			input: `
@@ -252,47 +240,19 @@ syscall(SYS_csource7, /*flag=*/4ul);
 syscall(SYS_csource7, /*flag=BIT_0|0x4*/5ul);
 `,
 		},
-
-		{
-			input: `
-csource0(0xffffffff)
-csource8(0xffffffffffffffff)
-`,
-			output: `
-syscall(SYS_csource0, /*num=*/(intptr_t)-1);
-syscall(SYS_csource8, /*num=*/(intptr_t)-1);
-`,
-		},
-		{
-			input: `
-csource0(0xffffffff)
-csource8(0xffffffffffffffff)
-`,
-			output: `
-syscall(SYS_csource0, /*num=*/(intptr_t)-1);
-syscall(SYS_csource8, /*num=*/(intptr_t)-1);
-`,
-			target: target32,
-		},
 	}
 	for i, test := range tests {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
-			if test.target == nil {
-				test.target = target64
-			}
-			p, err := test.target.Deserialize([]byte(test.input), prog.Strict)
+			p, err := target.Deserialize([]byte(test.input), prog.Strict)
 			if err != nil {
 				t.Fatal(err)
 			}
 			ctx := &context{
 				p:         p,
-				target:    test.target,
-				sysTarget: targets.Get(test.target.OS, test.target.Arch),
+				target:    target,
+				sysTarget: targets.Get(target.OS, target.Arch),
 			}
-			// Disable comment generation, as it's not the focus of these tests.
-			// This simplifies the expected output. For tests covering comments, see
-			// /pkg/csource/syscall_generation_test.go.
-			calls, _, err := ctx.generateProgCalls(p, false, false)
+			calls, _, err := ctx.generateProgCalls(p, false)
 			if err != nil {
 				t.Fatal(err)
 			}

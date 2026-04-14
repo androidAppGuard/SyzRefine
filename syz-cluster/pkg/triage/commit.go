@@ -4,9 +4,9 @@
 package triage
 
 import (
+	"log"
 	"time"
 
-	"github.com/google/syzkaller/pkg/debugtracer"
 	"github.com/google/syzkaller/pkg/vcs"
 	"github.com/google/syzkaller/syz-cluster/pkg/api"
 )
@@ -21,37 +21,26 @@ type TreeOps interface {
 }
 
 type CommitSelector struct {
-	ops    TreeOps
-	tracer debugtracer.DebugTracer
+	ops TreeOps
 }
 
-func NewCommitSelector(ops TreeOps, tracer debugtracer.DebugTracer) *CommitSelector {
-	return &CommitSelector{ops: ops, tracer: tracer}
+func NewCommitSelector(ops TreeOps) *CommitSelector {
+	return &CommitSelector{ops: ops}
 }
-
-type SelectResult struct {
-	Commit string
-	Reason string // Set if Commit is empty.
-}
-
-const (
-	reasonSeriesTooOld = "series lags behind the current HEAD too much"
-	reasonNotApplies   = "series does not apply"
-)
 
 // Select returns the best matching commit hash.
-func (cs *CommitSelector) Select(series *api.Series, tree *api.Tree, lastBuild *api.Build) (SelectResult, error) {
+func (cs *CommitSelector) Select(series *api.Series, tree *api.Tree, lastBuild *api.Build) (string, error) {
 	head, err := cs.ops.HeadCommit(tree)
 	if err != nil || head == nil {
-		return SelectResult{}, err
+		return "", err
 	}
-	cs.tracer.Log("current HEAD: %q (%v)", head.Hash, head.Date)
+	log.Printf("current HEAD: %q (%v)", head.Hash, head.Date)
 	// If the series is already too old, it may be incompatible even if it applies cleanly.
 	const seriesLagsBehind = time.Hour * 24 * 7
 	if diff := head.CommitDate.Sub(series.PublishedAt); series.PublishedAt.Before(head.CommitDate) &&
 		diff > seriesLagsBehind {
-		cs.tracer.Log("the series is too old: %v before the HEAD", diff)
-		return SelectResult{Reason: reasonSeriesTooOld}, nil
+		log.Printf("the series is too old: %v before the HEAD", diff)
+		return "", nil
 	}
 
 	// Algorithm:
@@ -64,20 +53,20 @@ func (cs *CommitSelector) Select(series *api.Series, tree *api.Tree, lastBuild *
 	if lastBuild != nil {
 		// Check if the commit is still good enough.
 		if diff := head.CommitDate.Sub(lastBuild.CommitDate); diff > seriesLagsBehind {
-			cs.tracer.Log("the last successful build is already too old: %v, skipping", diff)
+			log.Printf("the last successful build is already too old: %v, skipping", diff)
 		} else {
 			hashes = append(hashes, lastBuild.CommitHash)
 		}
 	}
 	for _, hash := range append(hashes, head.Hash) {
-		cs.tracer.Log("considering %q", hash)
+		log.Printf("considering %q", hash)
 		err := cs.ops.ApplySeries(hash, series.PatchBodies())
 		if err == nil {
-			cs.tracer.Log("series can be applied to %q", hash)
-			return SelectResult{Commit: hash}, nil
+			log.Printf("series can be applied to %q", hash)
+			return hash, nil
 		} else {
-			cs.tracer.Log("failed to apply to %q: %v", hash, err)
+			log.Printf("failed to apply to %q: %v", hash, err)
 		}
 	}
-	return SelectResult{Reason: reasonNotApplies}, nil
+	return "", nil
 }

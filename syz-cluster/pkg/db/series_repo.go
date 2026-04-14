@@ -8,7 +8,6 @@ package db
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
@@ -36,18 +35,24 @@ func NewSeriesRepository(client *spanner.Client) *SeriesRepository {
 // TODO: move to SeriesPatchesRepository?
 // nolint:dupl
 func (repo *SeriesRepository) PatchByID(ctx context.Context, id string) (*Patch, error) {
-	return readEntity[Patch](ctx, repo.client.Single(), spanner.Statement{
+	stmt := spanner.Statement{
 		SQL:    "SELECT * FROM Patches WHERE ID=@id",
 		Params: map[string]interface{}{"id": id},
-	})
+	}
+	iter := repo.client.Single().Query(ctx, stmt)
+	defer iter.Stop()
+	return readOne[Patch](iter)
 }
 
 // nolint:dupl
 func (repo *SeriesRepository) GetByExtID(ctx context.Context, extID string) (*Series, error) {
-	return readEntity[Series](ctx, repo.client.Single(), spanner.Statement{
+	stmt := spanner.Statement{
 		SQL:    "SELECT * FROM Series WHERE ExtID=@extID",
 		Params: map[string]interface{}{"extID": extID},
-	})
+	}
+	iter := repo.client.Single().Query(ctx, stmt)
+	defer iter.Stop()
+	return readOne[Series](iter)
 }
 
 var ErrSeriesExists = errors.New("the series already exists")
@@ -121,27 +126,22 @@ func (repo *SeriesRepository) Count(ctx context.Context) (int, error) {
 }
 
 type SeriesWithSession struct {
-	Series   *Series
-	Session  *Session
-	Findings int
+	Series  *Series
+	Session *Session
 }
 
 type SeriesFilter struct {
-	Cc           string
-	Status       SessionStatus
-	WithFindings bool
-	Limit        int
-	Offset       int
+	Cc string
 }
 
 // ListLatest() returns the list of series ordered by the decreasing PublishedAt value.
 func (repo *SeriesRepository) ListLatest(ctx context.Context, filter SeriesFilter,
-	maxPublishedAt time.Time) ([]*SeriesWithSession, error) {
+	maxPublishedAt time.Time, limit int) ([]*SeriesWithSession, error) {
 	ro := repo.client.ReadOnlyTransaction()
 	defer ro.Close()
 
 	stmt := spanner.Statement{
-		SQL:    "SELECT Series.* FROM Series WHERE 1=1",
+		SQL:    "SELECT * FROM Series WHERE 1=1",
 		Params: map[string]interface{}{},
 	}
 	if !maxPublishedAt.IsZero() {
@@ -152,137 +152,63 @@ func (repo *SeriesRepository) ListLatest(ctx context.Context, filter SeriesFilte
 		stmt.SQL += " AND @cc IN UNNEST(Cc)"
 		stmt.Params["cc"] = filter.Cc
 	}
-	if filter.Status != SessionStatusAny {
-		// It could have been an INNER JOIN in the main query, but let's favor the simpler code
-		// in this function.
-		// The optimizer should transform the query to a JOIN anyway.
-		stmt.SQL += " AND EXISTS(SELECT 1 FROM Sessions WHERE"
-		switch filter.Status {
-		case SessionStatusWaiting:
-			stmt.SQL += " Sessions.SeriesID = Series.ID AND Sessions.StartedAt IS NULL"
-		case SessionStatusInProgress:
-			stmt.SQL += " Sessions.ID = Series.LatestSessionID AND Sessions.FinishedAt IS NULL"
-		case SessionStatusFinished:
-			stmt.SQL += " Sessions.ID = Series.LatestSessionID AND Sessions.FinishedAt IS NOT NULL" +
-				" AND Sessions.SkipReason IS NULL"
-		case SessionStatusSkipped:
-			stmt.SQL += " Sessions.ID = Series.LatestSessionID AND Sessions.SkipReason IS NOT NULL"
-		default:
-			return nil, fmt.Errorf("unknown status value: %q", filter.Status)
-		}
-		stmt.SQL += ")"
-	}
-	if filter.WithFindings {
-		stmt.SQL += " AND Series.LatestSessionID IS NOT NULL " +
-			"AND EXISTS(SELECT 1 FROM Findings WHERE Findings.SessionID = Series.LatestSessionID)"
-	}
-	stmt.SQL += " ORDER BY PublishedAt DESC, ID"
-	if filter.Limit > 0 {
+	stmt.SQL += " ORDER BY PublishedAt DESC"
+	if limit > 0 {
 		stmt.SQL += " LIMIT @limit"
-		stmt.Params["limit"] = filter.Limit
+		stmt.Params["limit"] = limit
 	}
-	if filter.Offset > 0 {
-		stmt.SQL += " OFFSET @offset"
-		stmt.Params["offset"] = filter.Offset
-	}
-	seriesList, err := readEntities[Series](ctx, ro, stmt)
+	iter := ro.Query(ctx, stmt)
+	defer iter.Stop()
+
+	seriesList, err := readEntities[Series](iter)
 	if err != nil {
 		return nil, err
 	}
 
 	// Now query Sessions.
-	var ret []*SeriesWithSession
-	for _, series := range seriesList {
-		obj := &SeriesWithSession{Series: series}
-		ret = append(ret, obj)
-	}
-
-	// And the rest of the data.
-	err = repo.querySessions(ctx, ro, ret)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query sessions: %w", err)
-	}
-	err = repo.queryFindingCounts(ctx, ro, ret)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query finding counts: %w", err)
-	}
-	return ret, nil
-}
-
-func (repo *SeriesRepository) querySessions(ctx context.Context, ro *spanner.ReadOnlyTransaction,
-	seriesList []*SeriesWithSession) error {
-	idToSeries := map[string]*SeriesWithSession{}
 	var keys []string
-	for _, item := range seriesList {
-		series := item.Series
-		idToSeries[series.ID] = item
+	var ret []*SeriesWithSession
+	idToSeries := map[string]*SeriesWithSession{}
+	for _, series := range seriesList {
 		if !series.LatestSessionID.IsNull() {
 			keys = append(keys, series.LatestSessionID.String())
 		}
+		obj := &SeriesWithSession{Series: series}
+		ret = append(ret, obj)
+		idToSeries[series.ID] = obj
 	}
-	if len(keys) == 0 {
-		return nil
-	}
-	sessions, err := readEntities[Session](ctx, ro, spanner.Statement{
-		SQL: "SELECT * FROM Sessions WHERE ID IN UNNEST(@ids)",
-		Params: map[string]interface{}{
-			"ids": keys,
-		},
-	})
-	if err != nil {
-		return err
-	}
-	for _, session := range sessions {
-		obj := idToSeries[session.SeriesID]
-		if obj != nil {
-			obj.Session = session
+	if len(keys) > 0 {
+		iter := ro.Query(ctx, spanner.Statement{
+			SQL: "SELECT * FROM Sessions WHERE ID IN UNNEST(@ids)",
+			Params: map[string]interface{}{
+				"ids": keys,
+			},
+		})
+		defer iter.Stop()
+		sessions, err := readEntities[Session](iter)
+		if err != nil {
+			return nil, err
+		}
+		for _, session := range sessions {
+			obj := idToSeries[session.SeriesID]
+			if obj != nil {
+				obj.Session = session
+			}
 		}
 	}
-	return nil
-}
-
-func (repo *SeriesRepository) queryFindingCounts(ctx context.Context, ro *spanner.ReadOnlyTransaction,
-	seriesList []*SeriesWithSession) error {
-	var keys []string
-	sessionToSeries := map[string]*SeriesWithSession{}
-	for _, series := range seriesList {
-		if series.Session == nil || series.Session.Status() != SessionStatusFinished {
-			continue
-		}
-		keys = append(keys, series.Session.ID)
-		sessionToSeries[series.Session.ID] = series
-	}
-	if len(keys) == 0 {
-		return nil
-	}
-
-	type findingCount struct {
-		SessionID string `spanner:"SessionID"`
-		Count     int64  `spanner:"Count"`
-	}
-	list, err := readEntities[findingCount](ctx, repo.client.Single(), spanner.Statement{
-		SQL: "SELECT `SessionID`, COUNT(`ID`) as `Count` FROM `Findings` " +
-			"WHERE `SessionID` IN UNNEST(@ids) GROUP BY `SessionID`",
-		Params: map[string]interface{}{
-			"ids": keys,
-		},
-	})
-	if err != nil {
-		return err
-	}
-	for _, item := range list {
-		sessionToSeries[item.SessionID].Findings = int(item.Count)
-	}
-	return nil
+	return ret, nil
 }
 
 // golint sees too much similarity with SessionRepository's ListForSeries, but in reality there's not.
 // nolint:dupl
 func (repo *SeriesRepository) ListPatches(ctx context.Context, series *Series) ([]*Patch, error) {
-	return readEntities[Patch](ctx, repo.client.Single(), spanner.Statement{
+	stmt := spanner.Statement{
 		SQL: "SELECT * FROM `Patches` WHERE `SeriesID` = @seriesID ORDER BY `Seq`",
 		Params: map[string]interface{}{
 			"seriesID": series.ID,
 		},
-	})
+	}
+	iter := repo.client.Single().Query(ctx, stmt)
+	defer iter.Stop()
+	return readEntities[Patch](iter)
 }

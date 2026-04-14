@@ -1,5 +1,4 @@
 TITLE: BUG: scheduling while atomic in pause
-ALT: BUG: scheduling while atomic in SyS_pause
 TYPE: ATOMIC_SLEEP
 
 [  185.479466] BUG: scheduling while atomic: syz-executor0/19425/0x00000000

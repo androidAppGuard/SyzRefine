@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/syzkaller/pkg/debugtracer"
 	"github.com/google/syzkaller/pkg/vcs"
 	"github.com/google/syzkaller/syz-cluster/pkg/api"
 	"github.com/stretchr/testify/assert"
@@ -21,39 +20,39 @@ func TestCommitSelector(t *testing.T) {
 		ops    TreeOps
 		series *api.Series
 		last   *api.Build
-		result SelectResult
+		commit string
 	}{
 		{
 			name:   "fresh series, no last build",
 			series: &api.Series{PublishedAt: date("2020-Jan-15")},
 			ops:    newTestGitOps(&vcs.Commit{Hash: "head", CommitDate: date("2020-Jan-10")}, allApply),
-			result: SelectResult{Commit: "head"},
+			commit: "head",
 		},
 		{
 			name:   "fresh series with a fresh last build",
 			series: &api.Series{PublishedAt: date("2020-Jan-15")},
 			ops:    newTestGitOps(&vcs.Commit{Hash: "head", CommitDate: date("2020-Jan-10")}, allApply),
 			last:   &api.Build{CommitHash: "build", CommitDate: date("2020-Jan-06")},
-			result: SelectResult{Commit: "build"},
+			commit: "build",
 		},
 		{
 			name:   "fresh series with a too old last build",
 			series: &api.Series{PublishedAt: date("2020-Jan-15")},
 			ops:    newTestGitOps(&vcs.Commit{Hash: "head", CommitDate: date("2020-Jan-10")}, allApply),
 			last:   &api.Build{CommitHash: "build", CommitDate: date("2019-Dec-20")},
-			result: SelectResult{Commit: "head"},
+			commit: "head",
 		},
 		{
 			name:   "slightly old series, no last build",
 			series: &api.Series{PublishedAt: date("2020-Jan-15")},
 			ops:    newTestGitOps(&vcs.Commit{Hash: "head", CommitDate: date("2020-Jan-20")}, allApply),
-			result: SelectResult{Commit: "head"},
+			commit: "head",
 		},
 		{
 			name:   "a too old series",
 			series: &api.Series{PublishedAt: date("2020-Jan-15")},
 			ops:    newTestGitOps(&vcs.Commit{Hash: "head", CommitDate: date("2020-Feb-15")}, allApply),
-			result: SelectResult{Reason: reasonSeriesTooOld},
+			commit: "",
 		},
 		{
 			name:   "doesn't apply to the known build",
@@ -63,7 +62,7 @@ func TestCommitSelector(t *testing.T) {
 				map[string]bool{"head": true, "build": false},
 			),
 			last:   &api.Build{CommitHash: "build", CommitDate: date("2020-Jan-10")},
-			result: SelectResult{Commit: "head"},
+			commit: "head",
 		},
 		{
 			name:   "doesn't apply anywhere",
@@ -73,16 +72,16 @@ func TestCommitSelector(t *testing.T) {
 				nil,
 			),
 			last:   &api.Build{CommitHash: "build", CommitDate: date("2020-Jan-10")},
-			result: SelectResult{Reason: reasonNotApplies},
+			commit: "",
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			selector := NewCommitSelector(test.ops, &debugtracer.NullTracer{})
-			result, err := selector.Select(test.series, testTree, test.last)
+			selector := NewCommitSelector(test.ops)
+			commit, err := selector.Select(test.series, testTree, test.last)
 			assert.NoError(t, err)
-			assert.Equal(t, test.result, result)
+			assert.Equal(t, test.commit, commit)
 		})
 	}
 }

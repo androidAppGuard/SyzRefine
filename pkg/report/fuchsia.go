@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/google/syzkaller/pkg/report/crash"
 	"github.com/google/syzkaller/pkg/symbolizer"
 	"github.com/ianlancetaylor/demangle"
 )
@@ -49,8 +50,8 @@ func ctorFuchsia(cfg *config) (reporterImpl, []string, error) {
 		config: cfg,
 	}
 	ctx.ignores = append(ctx.ignores, fuchsiaIgnores...)
-	if ctx.kernelDirs.Obj != "" {
-		ctx.obj = filepath.Join(ctx.kernelDirs.Obj, ctx.target.KernelObject)
+	if ctx.kernelObj != "" {
+		ctx.obj = filepath.Join(ctx.kernelObj, ctx.target.KernelObject)
 	}
 	suppressions := []string{
 		"fatal exception: process /tmp/syz-executor", // OOM presumably
@@ -323,6 +324,7 @@ var zirconOopses = []*oops{
 			},
 		},
 		[]*regexp.Regexp{},
+		crash.UnknownType,
 	},
 	{
 		[]byte("recursion in interrupt handler"),
@@ -343,6 +345,7 @@ var zirconOopses = []*oops{
 			},
 		},
 		[]*regexp.Regexp{},
+		crash.UnknownType,
 	},
 	// We should detect just "stopping other cpus" as some kernel crash rather then as "lost connection",
 	// but if we add oops for "stopping other cpus", then it will interfere with other formats,
@@ -357,9 +360,11 @@ var zirconOopses = []*oops{
 				title:        compile("welcome to Zircon"),
 				fmt:          "unexpected kernel reboot",
 				noStackTrace: true,
+				reportType:   crash.UnexpectedReboot,
 			},
 		},
 		[]*regexp.Regexp{},
+		crash.UnknownType,
 	},
 	{
 		[]byte("KVM internal error"),
@@ -371,6 +376,7 @@ var zirconOopses = []*oops{
 			},
 		},
 		[]*regexp.Regexp{},
+		crash.UnknownType,
 	},
 	{
 		[]byte("<== fatal exception"),
@@ -385,6 +391,7 @@ var zirconOopses = []*oops{
 		[]*regexp.Regexp{
 			compile("<== fatal exception: process .+?syz.+?\\["),
 		},
+		crash.UnknownType,
 	},
 }
 
@@ -405,6 +412,7 @@ var starnixOopses = []*oops{
 			},
 		},
 		[]*regexp.Regexp{},
+		crash.UnknownType,
 	},
 }
 

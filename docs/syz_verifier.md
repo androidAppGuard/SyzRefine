@@ -1,6 +1,3 @@
-**`syz-verifier` is currently broken and cannot be compiled/used, see
-[the backlog issue](https://github.com/google/syzkaller/issues/5976).**
-
 # syz-verifier
 
 Many bugs are easy to detect: they might cause assertions failures, crash our

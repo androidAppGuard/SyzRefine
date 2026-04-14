@@ -56,7 +56,6 @@ CREATE TABLE Sessions (
     FinishedAt TIMESTAMP,
     SkipReason STRING(1024),
     LogURI STRING(512) NOT NULL,
-    TriageLogURI STRING(512) NOT NULL,
     Tags ARRAY<STRING(256)>,
     CONSTRAINT FK_SeriesSessions FOREIGN KEY (SeriesID) REFERENCES Series (ID),
 ) PRIMARY KEY(ID);
@@ -73,7 +72,6 @@ CREATE TABLE SessionTests (
     BaseBuildID STRING(36),
     PatchedBuildID STRING(36),
     LogURI STRING(256) NOT NULL,
-    ArtifactsArchiveURI STRING(256) NOT NULL,
     CONSTRAINT FK_SessionResults FOREIGN KEY (SessionID) REFERENCES Sessions (ID),
     CONSTRAINT ResultEnum CHECK (Result IN ('passed', 'failed', 'error', 'running')),
     CONSTRAINT FK_BaseBuild FOREIGN KEY (BaseBuildID) REFERENCES Builds (ID),
@@ -90,11 +88,8 @@ CREATE TABLE Findings (
     SessionID STRING(36) NOT NULL,
     TestName STRING(256) NOT NULL,
     Title STRING(256) NOT NULL,
-    LogURI STRING(256) NOT NULL,
     ReportURI STRING(256) NOT NULL,
-    SyzReproURI STRING(256) NOT NULL,
-    SyzReproOptsURI STRING(256) NOT NULL,
-    CReproURI STRING(256) NOT NULL,
+    LogURI STRING(256) NOT NULL,
     CONSTRAINT FK_SessionCrashes FOREIGN KEY (SessionID) REFERENCES Sessions (ID),
     CONSTRAINT FK_TestCrashes FOREIGN KEY (SessionID, TestName) REFERENCES SessionTests (SessionID, TestName),
 ) PRIMARY KEY (ID);
@@ -103,21 +98,13 @@ CREATE UNIQUE INDEX NoDupFindings ON Findings(SessionID, TestName, Title);
 
 -- Session's bug reports.
 CREATE TABLE SessionReports (
-    ID STRING(36) NOT NULL, -- UUID
+    ID STRING(36) NOT NULL, -- UUID??
     SessionID STRING(36) NOT NULL, -- UUID
     ReportedAt TIMESTAMP,
     Moderation BOOL,
-    Reporter STRING(256),
+    Link STRING(256),
     CONSTRAINT FK_SessionReports FOREIGN KEY (SessionID) REFERENCES Sessions (ID),
 ) PRIMARY KEY(ID);
 
 CREATE UNIQUE INDEX NoDupSessionReports ON SessionReports(SessionID, Moderation);
-CREATE INDEX SessionReportsByStatus ON SessionReports (Reporter, ReportedAt);
-
--- Replies on a session report.
-CREATE TABLE ReportReplies (
-    MessageID STRING(512) NOT NULL, -- Gmail sets a limit of 500 characters for Message-ID
-    ReportID STRING(36) NOT NULL, -- UUID
-    Time TIMESTAMP,
-    CONSTRAINT FK_ReplyReportID FOREIGN KEY (ReportID) REFERENCES SessionReports (ID),
-) PRIMARY KEY(MessageID, ReportID);
+CREATE INDEX SessionReportsByStatus ON SessionReports (Moderation, ReportedAt);

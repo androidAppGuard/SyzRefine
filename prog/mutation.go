@@ -70,30 +70,48 @@ func (p *Prog) MutateWithOpts(rs rand.Source, ncalls int, ct *ChoiceTable, noMut
 		corpus:   corpus,
 		opts:     opts,
 	}
-	for stop, ok := false, false; !stop; stop = ok && len(p.Calls) != 0 && r.oneOf(opts.ExpectedIterations) {
+	for stop, ok := false, false; !stop; stop = ok && len(p.Calls) != 0 && r.oneOf(opts.ExpectedIterations) { // defaultvalue: 5
 		val := r.Intn(totalWeight)
 		val -= opts.SquashWeight
 		if val < 0 {
 			// Not all calls have anything squashable,
 			// so this has lower priority in reality.
+			// Annotation: 10%
+			// Annotation: 1. get all complext ptrs (anyPtr or struct/union);
+			// Annotation: 2. convert high-level-reprentation data into low-level-reprentation (byte)
+			// Annotation: 3. mutate (e.g., filp/insert/remove a bit) on these bytes data of arg
 			ok = ctx.squashAny()
 			continue
 		}
 		val -= opts.SpliceWeight
 		if val < 0 {
+			// Annotation: 43%
+			// Annoation: append a seed to a random call of program
 			ok = ctx.splice()
 			continue
 		}
 		val -= opts.InsertWeight
 		if val < 0 {
+			// Annotation: 21%
+			// Annotation: insert a call before a random call of program
 			ok = ctx.insertCall()
 			continue
 		}
 		val -= opts.MutateArgWeight
 		if val < 0 {
+			// Annotation: 21%
+			// Annotation: choose a arg of call based on arg complexity mutate
+			// Annotation: 1. IntType mutate: add/subtract 1 or divide its type size;
+			//			   2. FlagsType: Change a flag value (increment/decrement the old value) or generate a new one;
+			//			   3. LenType: increment 1 or decrement 100 to Fine-tuning the value
+			// 			   4. Resource/Vam/Proc Type: regenerate to replace the arg
+			//             5. BufferType: mutate the data of buff (e.g., rand a string for filename or filp/insert/remove a bit on data)
+			//			   6. Ptr/Struct/Union Type: regenerate a new same type arg to iteratively replace original arg
 			ok = ctx.mutateArg()
 			continue
 		}
+		// Annotation: 2%
+		// Annotation: random remove a call
 		ok = ctx.removeCall()
 	}
 	p.sanitizeFix()
@@ -137,20 +155,23 @@ func (ctx *mutator) splice() bool {
 // Subsequently, if the ANY contains blobs, mutates a random blob.
 func (ctx *mutator) squashAny() bool {
 	p, r := ctx.p, ctx.r
+	// Annotation: anyPtr type or struct/union (some complex struct ptr)
 	complexPtrs := p.complexPtrs()
 	if len(complexPtrs) == 0 {
 		return false
 	}
+
 	ptr := complexPtrs[r.Intn(len(complexPtrs))]
 	if ctx.noMutate[ptr.call.Meta.ID] {
 		return false
 	}
-	if ptr.call.Meta.Attrs.NoSquash {
-		return false
-	}
+
+	// Annotation: process non-AnyPtr
 	if !p.Target.isAnyPtr(ptr.arg.Type()) {
+		// Annotation: convert high-level-reprentation data into low-level-reprentation (byte)
 		p.Target.squashPtr(ptr.arg)
 	}
+	// Annotation: first get all data represented by byte[], than adopt data mutation (e.g., film a bit)
 	var blobs []*DataArg
 	var bases []*PointerArg
 	ForeachSubArg(ptr.arg, func(arg Arg, ctx *ArgCtx) {
@@ -227,20 +248,13 @@ func (ctx *mutator) mutateArg() bool {
 		return false
 	}
 	c := p.Calls[idx]
-	if c.Meta.Attrs.KFuzzTest {
-		tmp := r.genKFuzzTest
-		r.genKFuzzTest = true
-		defer func() {
-			r.genKFuzzTest = tmp
-		}()
-	}
 	if ctx.noMutate[c.Meta.ID] {
 		return false
 	}
 	updateSizes := true
 	for stop, ok := false, false; !stop; stop = ok && r.oneOf(ctx.opts.MutateArgCount) {
 		ok = true
-		ma := &mutationArgs{target: p.Target, ignoreLengths: c.Meta.Attrs.KFuzzTest}
+		ma := &mutationArgs{target: p.Target}
 		ForeachArg(c, ma.collectArg)
 		if len(ma.args) == 0 {
 			return false
@@ -278,7 +292,7 @@ func chooseCall(p *Prog, r *randGen) int {
 	for _, c := range p.Calls {
 		var totalPrio float64
 		ForeachArg(c, func(arg Arg, ctx *ArgCtx) {
-			prio, stopRecursion := arg.Type().getMutationPrio(p.Target, arg, false, c.Meta.Attrs.KFuzzTest)
+			prio, stopRecursion := arg.Type().getMutationPrio(p.Target, arg, false)
 			totalPrio += prio
 			ctx.Stop = stopRecursion
 		})
@@ -516,10 +530,7 @@ func (t *ArrayType) mutate(r *randGen, s *state, arg Arg, ctx ArgCtx) (calls []*
 
 func (t *PtrType) mutate(r *randGen, s *state, arg Arg, ctx ArgCtx) (calls []*Call, retry, preserve bool) {
 	a := arg.(*PointerArg)
-	// Do not generate special pointers for KFuzzTest calls, as they are
-	// difficult to identify in the kernel and can lead to false positive
-	// crash reports.
-	if r.oneOf(1000) && !r.genKFuzzTest {
+	if r.oneOf(1000) {
 		removeArg(a.Res)
 		index := r.rand(len(r.target.SpecialPointers))
 		newArg := MakeSpecialPointerArg(t, a.Dir(), index)
@@ -575,7 +586,6 @@ func (t *ConstType) mutate(r *randGen, s *state, arg Arg, ctx ArgCtx) (calls []*
 type mutationArgs struct {
 	target        *Target
 	ignoreSpecial bool
-	ignoreLengths bool
 	prioSum       float64
 	args          []mutationArg
 	argsBuffer    [16]mutationArg
@@ -598,7 +608,7 @@ func (ma *mutationArgs) collectArg(arg Arg, ctx *ArgCtx) {
 	ma.ignoreSpecial = false
 
 	typ := arg.Type()
-	prio, stopRecursion := typ.getMutationPrio(ma.target, arg, ignoreSpecial, ma.ignoreLengths)
+	prio, stopRecursion := typ.getMutationPrio(ma.target, arg, ignoreSpecial)
 	ctx.Stop = stopRecursion
 
 	if prio == dontMutate {
@@ -628,8 +638,7 @@ func (ma *mutationArgs) chooseArg(r *rand.Rand) (Arg, ArgCtx) {
 // TODO: find a way to estimate optimal priority values.
 // Assign a priority for each type. The boolean is the reference type and it has
 // the minimum priority, since it has only two possible values.
-func (t *IntType) getMutationPrio(target *Target, arg Arg,
-	ignoreSpecial, ignoreLengths bool) (prio float64, stopRecursion bool) {
+func (t *IntType) getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (prio float64, stopRecursion bool) {
 	// For a integer without a range of values, the priority is based on
 	// the number of bits occupied by the underlying type.
 	plainPrio := math.Log2(float64(t.TypeBitSize())) + 0.1*maxPriority
@@ -662,16 +671,14 @@ func (t *IntType) getMutationPrio(target *Target, arg Arg,
 	return prio, false
 }
 
-func (t *StructType) getMutationPrio(target *Target, arg Arg,
-	ignoreSpecial, ignoreLengths bool) (prio float64, stopRecursion bool) {
+func (t *StructType) getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (prio float64, stopRecursion bool) {
 	if target.SpecialTypes[t.Name()] == nil || ignoreSpecial {
 		return dontMutate, false
 	}
 	return maxPriority, true
 }
 
-func (t *UnionType) getMutationPrio(target *Target, arg Arg,
-	ignoreSpecial, ignoreLengths bool) (prio float64, stopRecursion bool) {
+func (t *UnionType) getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (prio float64, stopRecursion bool) {
 	if target.SpecialTypes[t.Name()] == nil && len(t.Fields) == 1 || ignoreSpecial {
 		return dontMutate, false
 	}
@@ -683,8 +690,7 @@ func (t *UnionType) getMutationPrio(target *Target, arg Arg,
 	return maxPriority, true
 }
 
-func (t *FlagsType) getMutationPrio(target *Target, arg Arg,
-	ignoreSpecial, ignoreLengths bool) (prio float64, stopRecursion bool) {
+func (t *FlagsType) getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (prio float64, stopRecursion bool) {
 	prio = rangeSizePrio(uint64(len(t.Vals)))
 	if t.BitMask {
 		// We want a higher priority because the mutation will include
@@ -709,8 +715,7 @@ func rangeSizePrio(size uint64) (prio float64) {
 	return prio
 }
 
-func (t *PtrType) getMutationPrio(target *Target, arg Arg,
-	ignoreSpecial, ignoreLengths bool) (prio float64, stopRecursion bool) {
+func (t *PtrType) getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (prio float64, stopRecursion bool) {
 	if arg.(*PointerArg).IsSpecial() {
 		// TODO: we ought to mutate this, but we don't have code for this yet.
 		return dontMutate, false
@@ -718,42 +723,32 @@ func (t *PtrType) getMutationPrio(target *Target, arg Arg,
 	return 0.3 * maxPriority, false
 }
 
-func (t *ConstType) getMutationPrio(target *Target, arg Arg,
-	ignoreSpecial, ignoreLengths bool) (prio float64, stopRecursion bool) {
+func (t *ConstType) getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (prio float64, stopRecursion bool) {
 	return dontMutate, false
 }
 
-func (t *CsumType) getMutationPrio(target *Target, arg Arg,
-	ignoreSpecial, ignoreLengths bool) (prio float64, stopRecursion bool) {
+func (t *CsumType) getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (prio float64, stopRecursion bool) {
 	return dontMutate, false
 }
 
-func (t *ProcType) getMutationPrio(target *Target, arg Arg,
-	ignoreSpecial, ignoreLengths bool) (prio float64, stopRecursion bool) {
+func (t *ProcType) getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (prio float64, stopRecursion bool) {
 	return 0.5 * maxPriority, false
 }
 
-func (t *ResourceType) getMutationPrio(target *Target, arg Arg,
-	ignoreSpecial, ignoreLengths bool) (prio float64, stopRecursion bool) {
+func (t *ResourceType) getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (prio float64, stopRecursion bool) {
 	return 0.5 * maxPriority, false
 }
 
-func (t *VmaType) getMutationPrio(target *Target, arg Arg,
-	ignoreSpecial, ignoreLengths bool) (prio float64, stopRecursion bool) {
+func (t *VmaType) getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (prio float64, stopRecursion bool) {
 	return 0.5 * maxPriority, false
 }
 
-func (t *LenType) getMutationPrio(target *Target, arg Arg,
-	ignoreSpecial, ignoreLengths bool) (prio float64, stopRecursion bool) {
+func (t *LenType) getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (prio float64, stopRecursion bool) {
 	// Mutating LenType only produces "incorrect" results according to descriptions.
-	if ignoreLengths {
-		return dontMutate, false
-	}
 	return 0.1 * maxPriority, false
 }
 
-func (t *BufferType) getMutationPrio(target *Target, arg Arg,
-	ignoreSpecial, ignoreLengths bool) (prio float64, stopRecursion bool) {
+func (t *BufferType) getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (prio float64, stopRecursion bool) {
 	if arg.Dir() == DirOut && !t.Varlen() {
 		return dontMutate, false
 	}
@@ -768,8 +763,7 @@ func (t *BufferType) getMutationPrio(target *Target, arg Arg,
 	return 0.8 * maxPriority, false
 }
 
-func (t *ArrayType) getMutationPrio(target *Target, arg Arg,
-	ignoreSpecial, ignoreLengths bool) (prio float64, stopRecursion bool) {
+func (t *ArrayType) getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (prio float64, stopRecursion bool) {
 	if t.Kind == ArrayRangeLen && t.RangeBegin == t.RangeEnd {
 		return dontMutate, false
 	}

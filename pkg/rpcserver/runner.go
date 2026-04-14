@@ -174,7 +174,9 @@ func (runner *Runner) ConnectionLoop() error {
 			default:
 			}
 		}
+		// Annotation: will continues to consume queue, and if queue is empty will consume "queue.Callback(fuzzer.genFuzz)"
 		for len(runner.requests)-len(runner.executing) < 2*runner.procs {
+			// Annotation: these queue share themself by Distribute(
 			req := runner.source.Next(runner.id)
 			if req == nil {
 				break
@@ -191,6 +193,7 @@ func (runner *Runner) ConnectionLoop() error {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
+		// Annotation: recive the execution info
 		raw, err := wrappedRecv[*flatrpc.ExecutorMessageRaw](runner)
 		if err != nil {
 			return err
@@ -202,6 +205,7 @@ func (runner *Runner) ConnectionLoop() error {
 		case *flatrpc.ExecutingMessage:
 			err = runner.handleExecutingMessage(msg)
 		case *flatrpc.ExecResult:
+			// Annotaion: process the ExecResult
 			err = runner.handleExecResult(msg)
 		case *flatrpc.StateResult:
 			buf := new(bytes.Buffer)
@@ -294,6 +298,7 @@ func (runner *Runner) sendRequest(req *queue.Request) error {
 	var data []byte
 	switch req.Type {
 	case flatrpc.RequestTypeProgram:
+		// Annotation: encoding program as bytes data for sending
 		progData, err := req.Prog.SerializeForExec()
 		if err != nil {
 			// It's bad if we systematically fail to serialize programs,
@@ -344,6 +349,7 @@ func (runner *Runner) sendRequest(req *queue.Request) error {
 		},
 	}
 	runner.requests[id] = req
+	// Annotation: sending
 	return flatrpc.Send(runner.conn, msg)
 }
 
@@ -415,6 +421,10 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 		if msg.Info.Freshness == 0 {
 			runner.stats.statExecutorRestarts.Add(1)
 		}
+		if !runner.cover && req.ExecOpts.ExecFlags&flatrpc.ExecFlagCollectSignal != 0 {
+			// Coverage collection is disabled, but signal was requested => use a substitute signal.
+			addFallbackSignal(req.Prog, msg.Info)
+		}
 		for _, call := range msg.Info.Calls {
 			runner.convertCallInfo(call)
 		}
@@ -428,12 +438,6 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 			}
 			msg.Info.ExtraRaw = nil
 			runner.convertCallInfo(msg.Info.Extra)
-		}
-		if !runner.cover && req.ExecOpts.ExecFlags&flatrpc.ExecFlagCollectSignal != 0 {
-			// Coverage collection is disabled, but signal was requested => use a substitute signal.
-			// Note that we do it after all the processing above in order to prevent it from being
-			// filtered out.
-			addFallbackSignal(req.Prog, msg.Info)
 		}
 	}
 	status := queue.Success
@@ -449,6 +453,8 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 		}
 		runner.hanged[msg.Id] = true
 	}
+	// Annotaion: execute req.callback, which is to determine if start a triage job based on coverage
+	// Annotaion: req.callback is assign when job is enqueue in: fuzzer.prepare(req, flags, attempt) /data/ghui/phd2/experiment_code/syzkaller_new/pkg/fuzzer/fuzzer.go
 	req.Done(&queue.Result{
 		Executor: queue.ExecutorID{
 			VM:   runner.id,

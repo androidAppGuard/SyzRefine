@@ -33,8 +33,6 @@ type Stats struct {
 	statExecHint            *stat.Val
 	statExecSeed            *stat.Val
 	statExecCollide         *stat.Val
-	statCoverOverflows      *stat.Val
-	statCompsOverflows      *stat.Val
 
 	// Instrumentation
 	statRecordLLMFix        *stat.Val
@@ -44,6 +42,16 @@ type Stats struct {
 	statRecordLLMGeneration        *stat.Val
 	statRecordLLMGenerationGrammar *stat.Val
 	statRecordLLMGenerationValid   *stat.Val
+
+	statRecordNewInputsLLMtype *stat.Val
+
+	statRecordRepairExecutionValid     *stat.Val
+	statRecordRepairExecutionTotal     *stat.Val
+	statRecordGenerationExecutionValid *stat.Val
+	statRecordGenerationExecutionTotal *stat.Val
+
+	statRecordExecCount      *stat.Val
+	statRecordExecValidCount *stat.Val
 }
 
 type SyscallStats struct {
@@ -91,10 +99,6 @@ func newStats(target *prog.Target) Stats {
 			stat.Rate{}, stat.StackedGraph("exec")),
 		statExecCollide: stat.New("exec collide", "Executions of programs in collide mode",
 			stat.Rate{}, stat.StackedGraph("exec")),
-		statCoverOverflows: stat.New("cover overflows", "Number of times the coverage buffer overflowed",
-			stat.Rate{}, stat.NoGraph),
-		statCompsOverflows: stat.New("comps overflows", "Number of times the comparisons buffer overflowed",
-			stat.Rate{}, stat.NoGraph),
 
 		// Instrumentation
 		statRecordLLMFix: stat.New("record llm fix", "number of llm fix",
@@ -110,8 +114,29 @@ func newStats(target *prog.Target) Stats {
 			stat.Rate{}, stat.StackedGraph("record")),
 		statRecordLLMGenerationValid: stat.New("record llm generation valid", "number of llm generation valid execution",
 			stat.Rate{}, stat.StackedGraph("record")),
+
+		statRecordNewInputsLLMtype: stat.New("record newinputs llmtype", "number of newinputs that the prog type is llmtype",
+			stat.Rate{}, stat.StackedGraph("record")),
+
+		statRecordRepairExecutionValid: stat.New("record repair valid execution", "number of repair valid execution",
+			stat.Rate{}, stat.StackedGraph("record")),
+		statRecordRepairExecutionTotal: stat.New("record repair total execution", "number of repair total execution",
+			stat.Rate{}, stat.StackedGraph("record")),
+
+		statRecordGenerationExecutionValid: stat.New("record generation valid execution", "number of generation valid execution",
+			stat.Rate{}, stat.StackedGraph("record")),
+		statRecordGenerationExecutionTotal: stat.New("record generation total execution", "number of generation total execution",
+			stat.Rate{}, stat.StackedGraph("record")),
+
+		statRecordExecCount: stat.New("record exec", "redord the number of exec",
+			stat.Rate{}, stat.StackedGraph("record")),
+		statRecordExecValidCount: stat.New("record valid exec", "redord the number of valid exec",
+			stat.Rate{}, stat.StackedGraph("record")),
 	}
 }
 
 var LLMRepairModel int = 1
 var LLMGenerateModel int = 2
+
+var ProgtypeTrandition int = 0
+var ProgtypeLLM int = 1

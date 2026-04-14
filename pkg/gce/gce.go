@@ -22,12 +22,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/syzkaller/sys/targets"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/compute/v1"
 	"google.golang.org/api/googleapi"
-	"google.golang.org/api/option"
 )
 
 type Context struct {
@@ -63,10 +61,12 @@ func NewContext(customZoneID string) (*Context, error) {
 		return nil, fmt.Errorf("failed to get a token source: %w", err)
 	}
 	httpClient := oauth2.NewClient(background, tokenSource)
-	ctx.computeService, err = compute.NewService(background, option.WithHTTPClient(httpClient))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create compute service: %w", err)
-	}
+	// nolint
+	// compute.New is deprecated: please use NewService instead.
+	// To provide a custom HTTP client, use option.WithHTTPClient.
+	// If you are using google.golang.org/api/googleapis/transport.APIKey,
+	// use option.WithAPIKey with NewService instead.
+	ctx.computeService, _ = compute.New(httpClient)
 	// Obtain project name, zone and current instance IP address.
 	ctx.ProjectID, err = ctx.getMeta("project/project-id")
 	if err != nil {
@@ -132,7 +132,6 @@ func (ctx *Context) CreateInstance(name, machineType, image, sshkey string,
 				AutoDelete: true,
 				Boot:       true,
 				Type:       "PERSISTENT",
-				DiskSizeGb: int64(diskSizeGB(machineType)),
 				InitializeParams: &compute.AttachedDiskInitializeParams{
 					DiskName:    name,
 					SourceImage: prefix + "/global/images/" + image,
@@ -212,16 +211,6 @@ retry:
 	return ip, nil
 }
 
-func diskSizeGB(machineType string) int {
-	if strings.HasPrefix(machineType, "c4a-") {
-		// For C4A machines, the only available disk type is "Hyperdisk Balanced",
-		// which must be >= 10GB.
-		return 10
-	}
-	// Use the default value.
-	return 0
-}
-
 func (ctx *Context) DeleteInstance(name string, wait bool) error {
 	var op *compute.Operation
 	err := ctx.apiCall(func() (err error) {
@@ -255,15 +244,7 @@ func (ctx *Context) IsInstanceRunning(name string) bool {
 	return inst.Status == "RUNNING"
 }
 
-func (ctx *Context) CreateImage(imageName, gcsFile, OS string) error {
-	var features []*compute.GuestOsFeature
-	if OS == targets.Linux {
-		features = []*compute.GuestOsFeature{
-			{
-				Type: "GVNIC",
-			},
-		}
-	}
+func (ctx *Context) CreateImage(imageName, gcsFile string) error {
 	image := &compute.Image{
 		Name: imageName,
 		RawDisk: &compute.ImageRawDisk{
@@ -272,7 +253,6 @@ func (ctx *Context) CreateImage(imageName, gcsFile, OS string) error {
 		Licenses: []string{
 			"https://www.googleapis.com/compute/v1/projects/vm-options/global/licenses/enable-vmx",
 		},
-		GuestOsFeatures: features,
 	}
 	var op *compute.Operation
 	err := ctx.apiCall(func() (err error) {

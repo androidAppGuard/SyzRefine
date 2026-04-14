@@ -87,6 +87,7 @@ func (r *Request) OnDone(cb DoneCallback) {
 
 func (r *Request) Done(res *Result) {
 	if r.callback != nil {
+		// Annotation: call function => processResult(req *queue.Request, res *queue.Result, flags ProgFlags, attempt int)
 		if !r.callback(r, res) {
 			return
 		}
@@ -97,6 +98,7 @@ func (r *Request) Done(res *Result) {
 	r.initChannel()
 	r.result = res
 	close(r.done)
+
 }
 
 var ErrRequestAborted = errors.New("context closed while waiting the result")
@@ -218,7 +220,6 @@ func (r *Result) GlobFiles() []string {
 
 type Status int
 
-//go:generate go run golang.org/x/tools/cmd/stringer -type Status
 const (
 	Success     Status = iota
 	ExecFailure        // For e.g. serialization errors.
@@ -307,6 +308,7 @@ func Order(sources ...Source) Source {
 	return &orderImpl{sources: sources}
 }
 
+// Annoration: Next will iterator to visit each queue for each type of task
 func (o *orderImpl) Next() *Request {
 	for _, s := range o.sources {
 		req := s.Next()
@@ -571,13 +573,7 @@ func (t *tee) Next() *Request {
 		return nil
 	}
 	t.queue.Submit(&Request{
-		// It makes little sense to copy other fields if these requests
-		// are to be executed in a different environment.
-		Type:        req.Type,
-		ExecOpts:    req.ExecOpts,
-		Prog:        req.Prog.Clone(),
-		BinaryFile:  req.BinaryFile,
-		GlobPattern: req.GlobPattern,
+		Prog: req.Prog.Clone(),
 	})
 	return req
 }

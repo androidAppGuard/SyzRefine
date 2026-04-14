@@ -85,11 +85,14 @@ type fileSubsystems struct {
 }
 
 func SaveMergeResult(ctx context.Context, client spannerclient.SpannerClient, descr *HistoryRecord, dec *json.Decoder,
-) (int, error) {
+	sss []*subsystem.Subsystem) (int, error) {
 	if client == nil {
 		return 0, fmt.Errorf("nil spannerclient")
 	}
 	var rowsCreated int
+	ssMatcher := subsystem.MakePathMatcher(sss)
+	ssCache := make(map[string][]string)
+
 	session := uuid.New().String()
 	var mutations []*spanner.Mutation
 
@@ -104,6 +107,8 @@ func SaveMergeResult(ctx context.Context, client spannerclient.SpannerClient, de
 		}
 		if mcr := wr.MCR; mcr != nil {
 			mutations = append(mutations, fileRecordMutation(session, mcr))
+			subsystems := getFileSubsystems(mcr.FilePath, ssMatcher, ssCache)
+			mutations = append(mutations, fileSubsystemsMutation(descr.Namespace, mcr.FilePath, subsystems))
 		} else if fl := wr.FL; fl != nil {
 			mutations = append(mutations, fileFunctionsMutation(session, fl))
 		} else {
@@ -404,10 +409,10 @@ type SelectScope struct {
 
 // FilesCoverageStream streams information about all the line coverage.
 // It is expensive and better to be used for time insensitive operations.
-func FilesCoverageStream(ctx context.Context, client spannerclient.SpannerClient, scope *SelectScope,
+func FilesCoverageStream(ctx context.Context, client spannerclient.SpannerClient, ns string, timePeriod TimePeriod,
 ) (<-chan *FileCoverageWithLineInfo, <-chan error) {
 	iter := client.Single().Query(ctx,
-		filesCoverageWithDetailsStmt(scope, true))
+		filesCoverageWithDetailsStmt(ns, "", "", timePeriod, true))
 	resCh := make(chan *FileCoverageWithLineInfo)
 	errCh := make(chan error)
 	go func() {
@@ -430,24 +435,14 @@ func FilesCoverageWithDetails(
 	for _, timePeriod := range scope.Periods {
 		needLinesDetails := onlyUnique
 		iterManager := client.Single().Query(ctx,
-			filesCoverageWithDetailsStmt(&SelectScope{
-				Ns:        scope.Ns,
-				Subsystem: scope.Subsystem,
-				Manager:   scope.Manager,
-				Periods:   []TimePeriod{timePeriod},
-			}, needLinesDetails))
+			filesCoverageWithDetailsStmt(scope.Ns, scope.Subsystem, scope.Manager, timePeriod, needLinesDetails))
 		defer iterManager.Stop()
 
 		var err error
 		var periodRes []*FileCoverageWithDetails
 		if onlyUnique {
 			iterAll := client.Single().Query(ctx,
-				filesCoverageWithDetailsStmt(&SelectScope{
-					Ns:        scope.Ns,
-					Subsystem: scope.Subsystem,
-					Manager:   "",
-					Periods:   []TimePeriod{timePeriod},
-				}, needLinesDetails))
+				filesCoverageWithDetailsStmt(scope.Ns, scope.Subsystem, "", timePeriod, needLinesDetails))
 			defer iterAll.Stop()
 			periodRes, err = readCoverageUniq(iterAll, iterManager)
 			if err != nil {
@@ -467,8 +462,8 @@ func FilesCoverageWithDetails(
 	return res, nil
 }
 
-func filesCoverageWithDetailsStmt(scope *SelectScope, withLines bool) spanner.Statement {
-	manager := scope.Manager
+func filesCoverageWithDetailsStmt(ns, subsystem, manager string, timePeriod TimePeriod, withLines bool,
+) spanner.Statement {
 	if manager == "" {
 		manager = "*"
 	}
@@ -486,15 +481,15 @@ from merge_history
 where
   merge_history.namespace=$1 and dateto=$2 and duration=$3 and manager=$4`,
 		Params: map[string]interface{}{
-			"p1": scope.Ns,
-			"p2": scope.Periods[0].DateTo,
-			"p3": scope.Periods[0].Days,
+			"p1": ns,
+			"p2": timePeriod.DateTo,
+			"p3": timePeriod.Days,
 			"p4": manager,
 		},
 	}
-	if scope.Subsystem != "" {
+	if subsystem != "" {
 		stmt.SQL += " and $5=ANY(subsystems)"
-		stmt.Params["p5"] = scope.Subsystem
+		stmt.Params["p5"] = subsystem
 	}
 	stmt.SQL += "\norder by files.filepath"
 	return stmt
@@ -621,54 +616,4 @@ func UniqCoverage(fullCov, partCov map[int]int64) map[int]int64 {
 		}
 	}
 	return res
-}
-
-func RegenerateSubsystems(ctx context.Context, ns string, sss []*subsystem.Subsystem,
-	client spannerclient.SpannerClient) (int, error) {
-	ssMatcher := subsystem.MakePathMatcher(sss)
-	ssCache := make(map[string][]string)
-	filePaths, err := getFilePaths(ctx, ns, client)
-	if err != nil {
-		return 0, err
-	}
-	var mutations []*spanner.Mutation
-	for _, filePath := range filePaths {
-		subsystems := getFileSubsystems(filePath, ssMatcher, ssCache)
-		mutations = append(mutations, fileSubsystemsMutation(ns, filePath, subsystems))
-	}
-	// There is a limit on the number of mutations per transaction (80k) imposed by the DB.
-	// Expected mutations count is < 20k and looks safe to do w/o batching.
-	if _, err = client.Apply(ctx, mutations); err != nil {
-		return 0, err
-	}
-	return len(mutations), nil
-}
-
-func getFilePaths(ctx context.Context, ns string, client spannerclient.SpannerClient) ([]string, error) {
-	iter := client.Single().Query(ctx, spanner.Statement{
-		SQL: `select filepath from file_subsystems where namespace=$1`,
-		Params: map[string]interface{}{
-			"p1": ns,
-		},
-	})
-	defer iter.Stop()
-
-	var res []string
-	for {
-		row, err := iter.Next()
-		if err == iterator.Done {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("iter.Next: %w", err)
-		}
-		var r struct {
-			Filepath string
-		}
-		if err = row.ToStruct(&r); err != nil {
-			return nil, fmt.Errorf("row.ToStruct: %w", err)
-		}
-		res = append(res, r.Filepath)
-	}
-	return res, nil
 }

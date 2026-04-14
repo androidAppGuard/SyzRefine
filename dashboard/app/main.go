@@ -25,8 +25,6 @@ import (
 	"github.com/google/syzkaller/pkg/email"
 	"github.com/google/syzkaller/pkg/hash"
 	"github.com/google/syzkaller/pkg/html"
-	"github.com/google/syzkaller/pkg/html/urlutil"
-	"github.com/google/syzkaller/pkg/report"
 	"github.com/google/syzkaller/pkg/subsystem"
 	"github.com/google/syzkaller/pkg/vcs"
 	"golang.org/x/sync/errgroup"
@@ -88,7 +86,6 @@ func initHTTPHandlers() {
 	http.HandleFunc("/cron/deprecate_assets", handleDeprecateAssets)
 	http.HandleFunc("/cron/refresh_subsystems", handleRefreshSubsystems)
 	http.HandleFunc("/cron/subsystem_reports", handleSubsystemReports)
-	http.HandleFunc("/cron/update_coverdb_subsystems", handleUpdateCoverDBSubsystems)
 }
 
 func handleMovedPermanently(dest string) http.HandlerFunc {
@@ -116,7 +113,7 @@ func makeUIBugFilter(c context.Context, filter *userBugFilter) *uiBugFilter {
 	return &uiBugFilter{
 		Filter: filter,
 		DropURL: func(name, value string) string {
-			return urlutil.DropParam(url, name, value)
+			return html.DropParam(url, name, value)
 		},
 	}
 }
@@ -367,7 +364,6 @@ type uiCommit struct {
 type uiBug struct {
 	Namespace      string
 	Title          string
-	ImpactScore    int
 	NumCrashes     int64
 	NumCrashesBad  bool
 	BisectCause    BisectStatus
@@ -1032,11 +1028,11 @@ func handleAdmin(c context.Context, w http.ResponseWriter, r *http.Request) erro
 		MemcacheStats:  memcacheStats,
 		Stopped:        alreadyStopped,
 		MoreStopClicks: 2,
-		StopLink:       urlutil.SetParam("/admin", "stop_clicked", "1"),
+		StopLink:       html.AmendURL("/admin", "stop_clicked", "1"),
 	}
 	if r.FormValue("stop_clicked") != "" {
 		data.MoreStopClicks = 1
-		data.StopLink = urlutil.SetParam("/admin", "action", "emergency_stop")
+		data.StopLink = html.AmendURL("/admin", "action", "emergency_stop")
 	}
 	if r.FormValue("job_type") != "" {
 		data.TypeJobs = &uiJobList{Title: "Last jobs:", Jobs: typeJobs}
@@ -1045,8 +1041,8 @@ func handleAdmin(c context.Context, w http.ResponseWriter, r *http.Request) erro
 		data.RecentJobs = &uiJobList{Title: "Recent jobs:", Jobs: recentJobs}
 		data.RunningJobs = &uiJobList{Title: "Running jobs:", Jobs: runningJobs}
 		data.PendingJobs = &uiJobList{Title: "Pending jobs:", Jobs: pendingJobs}
-		data.FixBisectionsLink = urlutil.SetParam("/admin", "job_type", fmt.Sprintf("%d", JobBisectFix))
-		data.CauseBisectionsLink = urlutil.SetParam("/admin", "job_type", fmt.Sprintf("%d", JobBisectCause))
+		data.FixBisectionsLink = html.AmendURL("/admin", "job_type", fmt.Sprintf("%d", JobBisectFix))
+		data.CauseBisectionsLink = html.AmendURL("/admin", "job_type", fmt.Sprintf("%d", JobBisectCause))
 	}
 	return serveTemplate(w, "admin.html", data)
 }
@@ -1215,7 +1211,7 @@ func handleBug(c context.Context, w http.ResponseWriter, r *http.Request) error 
 		LabelGroups:  getLabelGroups(c, bug),
 	}
 	if accessLevel == AccessAdmin && !bug.hasUserSubsystems() {
-		data.DebugSubsystems = urlutil.SetParam(data.Bug.Link, "debug_subsystems", "1")
+		data.DebugSubsystems = html.AmendURL(data.Bug.Link, "debug_subsystems", "1")
 	}
 	// bug.BisectFix is set to BisectNot in three cases :
 	// - no fix bisections have been performed on the bug
@@ -1316,7 +1312,7 @@ func debugBugSubsystems(c context.Context, w http.ResponseWriter, bug *Bug) erro
 		TraceWriter: w,
 	})
 	if err != nil {
-		fmt.Fprintf(w, "%s", err)
+		w.Write([]byte(fmt.Sprintf("%s", err)))
 	}
 	return nil
 }
@@ -1330,7 +1326,7 @@ func makeBugLabelUI(c context.Context, bug *Bug, entry BugLabel) *uiBugLabel {
 	if !strings.HasPrefix(url, "/"+bug.Namespace) {
 		link = fmt.Sprintf("/%s", bug.Namespace)
 	}
-	link = urlutil.TransformParam(link, "label", func(oldLabels []string) []string {
+	link = html.TransformURL(link, "label", func(oldLabels []string) []string {
 		return mergeLabelSet(oldLabels, entry.String())
 	})
 	ret := &uiBugLabel{
@@ -1462,11 +1458,11 @@ func handleSubsystemsList(c context.Context, w http.ResponseWriter, r *http.Requ
 		Name: "",
 		Open: uiSubsystemStats{
 			Count: cached.NoSubsystem.Open,
-			Link:  urlutil.SetParam("/"+hdr.Namespace, "no_subsystem", "true"),
+			Link:  html.AmendURL("/"+hdr.Namespace, "no_subsystem", "true"),
 		},
 		Fixed: uiSubsystemStats{
 			Count: cached.NoSubsystem.Fixed,
-			Link:  urlutil.SetParam("/"+hdr.Namespace+"/fixed", "no_subsystem", "true"),
+			Link:  html.AmendURL("/"+hdr.Namespace+"/fixed", "no_subsystem", "true"),
 		},
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
@@ -1475,7 +1471,7 @@ func handleSubsystemsList(c context.Context, w http.ResponseWriter, r *http.Requ
 		List:         list,
 		Unclassified: unclassified,
 		SomeHidden:   someHidden,
-		ShowAllURL:   urlutil.SetParam(getCurrentURL(c), "all", "true"),
+		ShowAllURL:   html.AmendURL(getCurrentURL(c), "all", "true"),
 	})
 }
 
@@ -1491,7 +1487,7 @@ func createUISubsystem(ns string, item *subsystem.Subsystem, cached *Cached) *ui
 		},
 		Fixed: uiSubsystemStats{
 			Count: stats.Fixed,
-			Link: urlutil.SetParam("/"+ns+"/fixed", "label", BugLabel{
+			Link: html.AmendURL("/"+ns+"/fixed", "label", BugLabel{
 				Label: SubsystemLabel,
 				Value: item.Name,
 			}.String()),
@@ -1941,7 +1937,6 @@ func createUIBug(c context.Context, bug *Bug, state *ReportingState, managers []
 	uiBug := &uiBug{
 		Namespace:      bug.Namespace,
 		Title:          bug.displayTitle(),
-		ImpactScore:    report.TitlesToImpact(bug.Title, bug.AltTitles...),
 		BisectCause:    bug.BisectCause,
 		BisectFix:      bug.BisectFix,
 		NumCrashes:     bug.NumCrashes,
@@ -2408,8 +2403,8 @@ func invalidateJobLink(c context.Context, job *Job, jobKey *db.Key, restart bool
 func formatLogLine(line string) string {
 	const maxLineLen = 1000
 
-	line = strings.ReplaceAll(line, "\n", " ")
-	line = strings.ReplaceAll(line, "\r", "")
+	line = strings.Replace(line, "\n", " ", -1)
+	line = strings.Replace(line, "\r", "", -1)
 	if len(line) > maxLineLen {
 		line = line[:maxLineLen]
 		line += "..."
@@ -2437,9 +2432,7 @@ func fetchErrorLogs(c context.Context) ([]byte, error) {
 	iter := adminClient.Entries(c,
 		logadmin.Filter(
 			// We filter our instances.delete errors as false positives. Delete event happens every second.
-			// Also, ignore GKE logs since it streams all stderr output as severity=ERROR.
-			fmt.Sprintf(`(NOT protoPayload.methodName:v1.compute.instances.delete)`+
-				` AND (NOT resource.type="k8s_container") AND timestamp > "%s" AND severity>="ERROR"`,
+			fmt.Sprintf(`(NOT protoPayload.methodName:v1.compute.instances.delete) AND timestamp > "%s" AND severity>="ERROR"`,
 				lastWeek)),
 		logadmin.NewestFirst(),
 	)

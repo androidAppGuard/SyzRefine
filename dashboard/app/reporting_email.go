@@ -10,11 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"net/http"
 	"net/mail"
 	"regexp"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,10 +20,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"cloud.google.com/go/civil"
 	"github.com/google/syzkaller/dashboard/dashapi"
-	"github.com/google/syzkaller/pkg/cover"
-	"github.com/google/syzkaller/pkg/coveragedb"
 	"github.com/google/syzkaller/pkg/email"
 	"github.com/google/syzkaller/pkg/email/lore"
 	"github.com/google/syzkaller/pkg/html"
@@ -39,7 +34,6 @@ import (
 // Email reporting interface.
 
 func initEmailReporting() {
-	http.HandleFunc("/cron/email_coverage_reports", handleCoverageReports)
 	http.HandleFunc("/cron/email_poll", handleEmailPoll)
 	http.HandleFunc("/_ah/mail/", handleIncomingMail)
 	http.HandleFunc("/_ah/bounce", handleEmailBounce)
@@ -74,12 +68,6 @@ const (
 		"The email is sent to  %[1]v address\n" +
 		"but the HASH does not correspond to any known bug.\n" +
 		"Please double check the address."
-	replyMalformedSyzTest = "I've failed to parse your command.\n" +
-		"Did you perhaps forget to provide the branch name, or added an extra ':'?\n" +
-		"Please use one of the two supported formats:\n" +
-		"1. #syz test\n" +
-		"2. #syz test: repo branch-or-commit-hash\n" +
-		"Note the lack of ':' in option 1."
 )
 
 var mailingLists map[string]bool
@@ -112,123 +100,6 @@ func (cfg *EmailConfig) Validate() error {
 		return fmt.Errorf("email config: subject prefix %q contains leading/trailing spaces", cfg.SubjectPrefix)
 	}
 	return nil
-}
-
-func (cfg *EmailConfig) getSubject(title string) string {
-	if cfg.SubjectPrefix != "" {
-		return cfg.SubjectPrefix + " " + title
-	}
-	return title
-}
-
-// handleCoverageReports sends a coverage report for the two full months preceding the current one.
-// Assuming it is called June 15, the monthly report will cover April-May diff.
-func handleCoverageReports(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	targetDate := civil.DateOf(timeNow(ctx)).AddMonths(-1)
-	periods, err := coveragedb.GenNPeriodsTill(2, targetDate, "month")
-	if err != nil {
-		msg := fmt.Sprintf("error generating coverage report: %s", err.Error())
-		log.Errorf(ctx, "%s", msg)
-		http.Error(w, "%s: %w", http.StatusBadRequest)
-		return
-	}
-	wg := sync.WaitGroup{}
-	for nsName, nsConfig := range getConfig(ctx).Namespaces {
-		if nsConfig.Coverage == nil || nsConfig.Coverage.EmailRegressionsTo == "" {
-			continue
-		}
-		emailTo := nsConfig.Coverage.EmailRegressionsTo
-		minDrop := defaultRegressionThreshold
-		if nsConfig.Coverage.RegressionThreshold > 0 {
-			minDrop = nsConfig.Coverage.RegressionThreshold
-		}
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := sendNsCoverageReport(ctx, nsName, emailTo, periods, minDrop); err != nil {
-				msg := fmt.Sprintf("error generating coverage report for ns '%s': %s", nsName, err.Error())
-				log.Errorf(ctx, "%s", msg)
-				return
-			}
-		}()
-	}
-	wg.Wait()
-}
-
-func sendNsCoverageReport(ctx context.Context, ns, email string,
-	period []coveragedb.TimePeriod, minDrop int) error {
-	var days int
-	for _, p := range period {
-		days += p.Days
-	}
-	periodFrom := fmt.Sprintf("%s %d", period[0].DateTo.Month.String(), period[0].DateTo.Year)
-	periodTo := fmt.Sprintf("%s %d", period[1].DateTo.Month.String(), period[1].DateTo.Year)
-	table, err := coverageTable(ctx, ns, period, minDrop)
-	if err != nil {
-		return fmt.Errorf("coverageTable: %w", err)
-	}
-	args := struct {
-		Namespace      string
-		PeriodFrom     string
-		PeriodFromDays int
-		PeriodTo       string
-		PeriodToDays   int
-		Link           string
-		Table          string
-	}{
-		Namespace:      ns,
-		PeriodFrom:     periodFrom,
-		PeriodFromDays: period[0].Days,
-		PeriodTo:       periodTo,
-		PeriodToDays:   period[1].Days,
-		Link: fmt.Sprintf("%s%s", appURL(ctx),
-			coveragePageLink(ns, period[1].Type, period[1].DateTo.String(), minDrop, 2, true)),
-		Table: table,
-	}
-	title := fmt.Sprintf("%s coverage regression in %s", ns, periodTo)
-	err = sendMailTemplate(ctx, &mailSendParams{
-		templateName: "mail_ns_coverage.txt",
-		templateArg:  args,
-		title:        title,
-		cfg: &EmailConfig{
-			Email: email,
-		},
-		reportID: "coverage-report",
-	})
-	if err != nil {
-		err2 := fmt.Errorf("error generating coverage report: %w", err)
-		log.Errorf(ctx, "%s", err2.Error())
-		return err2
-	}
-	return nil
-}
-
-func coverageTable(ctx context.Context, ns string, fromTo []coveragedb.TimePeriod, minDrop int) (string, error) {
-	covAndDates, err := coveragedb.FilesCoverageWithDetails(
-		ctx,
-		getCoverageDBClient(ctx),
-		&coveragedb.SelectScope{
-			Ns:      ns,
-			Periods: fromTo,
-		},
-		false)
-	if err != nil {
-		return "", fmt.Errorf("coveragedb.FilesCoverageWithDetails: %w", err)
-	}
-	templData := cover.FilesCoverageToTemplateData(covAndDates)
-	cover.FormatResult(templData, cover.Format{
-		OrderByCoveredLinesDrop:   true,
-		FilterMinCoveredLinesDrop: minDrop,
-	})
-	res := "Blocks diff,\tPath\n"
-	templData.Root.Visit(func(path string, summary int64, isDir bool) {
-		if !isDir {
-			res += fmt.Sprintf("% 11d\t%s\n", summary, path)
-		}
-	})
-	return res, nil
 }
 
 // handleEmailPoll is called by cron and sends emails for new bugs, if any.
@@ -390,7 +261,7 @@ func emailSendBugNotif(c context.Context, notif *dashapi.BugNotification) error 
 		return err
 	}
 	log.Infof(c, "sending notif %v for %q to %q: %v", notif.Type, notif.Title, to, body)
-	if err := sendMailText(c, cfg.getSubject(notif.Title), from, to, notif.ExtID, body); err != nil {
+	if err := sendMailText(c, cfg, notif.Title, from, to, notif.ExtID, body); err != nil {
 		return err
 	}
 	cmd := &dashapi.BugUpdate{
@@ -569,7 +440,7 @@ func sendMailTemplate(c context.Context, params *mailSendParams) error {
 		return fmt.Errorf("failed to execute %v template: %w", params.templateName, err)
 	}
 	log.Infof(c, "sending email %q to %q", params.title, to)
-	return sendMailText(c, params.cfg.getSubject(params.title), from, to, params.replyTo, body.String())
+	return sendMailText(c, params.cfg, params.title, from, to, params.replyTo, body.String())
 }
 func generateEmailBugTitle(rep *dashapi.BugReport, emailConfig *EmailConfig) string {
 	title := ""
@@ -595,6 +466,14 @@ func handleIncomingMail(w http.ResponseWriter, r *http.Request) {
 		log.Errorf(c, "invalid email handler URL: %s", url)
 		return
 	}
+	source := dashapi.NoDiscussion
+	for _, item := range getConfig(c).DiscussionEmails {
+		if item.ReceiveAddress != myEmail {
+			continue
+		}
+		source = item.Source
+		break
+	}
 	msg, err := email.Parse(r.Body, ownEmails(c), ownMailingLists(c), []string{
 		appURL(c),
 	})
@@ -605,85 +484,21 @@ func handleIncomingMail(w http.ResponseWriter, r *http.Request) {
 		log.Warningf(c, "failed to parse email: %v", err)
 		return
 	}
-	source := matchDiscussionEmail(c, myEmail)
-	inbox := matchInbox(c, msg)
-	log.Infof(c, "received email at %q, source %q, matched ignored inbox=%v",
-		myEmail, source, inbox != nil)
-	if inbox != nil {
-		err = processInboxEmail(c, msg, inbox)
-	} else if source != dashapi.NoDiscussion {
-		// Discussions are safe to handle even during an emergency stop.
-		err = processDiscussionEmail(c, msg, source)
-	} else {
+	log.Infof(c, "received email at %q, source %q", myEmail, source)
+	if source == dashapi.NoDiscussion {
 		if stop, err := emergentlyStopped(c); err != nil || stop {
 			log.Errorf(c, "abort email processing due to emergency stop (stop %v, err %v)",
 				stop, err)
 			return
 		}
 		err = processIncomingEmail(c, msg)
+	} else {
+		// Discussions are safe to handle even during an emergency stop.
+		err = processDiscussionEmail(c, msg, source)
 	}
 	if err != nil {
 		log.Errorf(c, "email processing failed: %s", err)
 	}
-}
-
-func matchDiscussionEmail(c context.Context, myEmail string) dashapi.DiscussionSource {
-	for _, item := range getConfig(c).DiscussionEmails {
-		if item.ReceiveAddress != myEmail {
-			continue
-		}
-		return item.Source
-	}
-	return dashapi.NoDiscussion
-}
-
-func matchInbox(c context.Context, msg *email.Email) *PerInboxConfig {
-	// We look at all raw addresses in To or Cc because, after forwarding, someone's reply
-	// will arrive to us both via the email through which we have forwarded and through the
-	// address that matched InboxRe.
-	for _, item := range getConfig(c).MonitoredInboxes {
-		rg := regexp.MustCompile(item.InboxRe)
-		for _, cc := range msg.RawCc {
-			if rg.MatchString(cc) {
-				return item
-			}
-		}
-	}
-	return nil
-}
-
-func processInboxEmail(c context.Context, msg *email.Email, inbox *PerInboxConfig) error {
-	if len(msg.Commands) == 0 || len(msg.BugIDs) == 0 || msg.OwnEmail {
-		// Do not forward emails with no commands.
-		// Also, we don't care about the emails that don't include any BugIDs.
-		return nil
-	}
-	needForwardTo := map[string]bool{}
-	for _, cc := range inbox.ForwardTo {
-		needForwardTo[cc] = true
-	}
-	for _, email := range msg.Cc {
-		delete(needForwardTo, email)
-	}
-	missing := slices.Collect(maps.Keys(needForwardTo))
-	sort.Strings(missing)
-	if len(missing) == 0 {
-		// Everything's OK.
-		log.Infof(c, "email %q has all necessary lists in Cc", msg.MessageID)
-		return nil
-	}
-	// We don't want to forward from a name+hash@domain address because
-	// the automation could confuse that with bug reports and not react to the commamnds in there.
-	// So we forward just from name@domain, but Cc name+hash@domain to still identify the email
-	// as related to the bug identified by the hash.
-	cc, err := email.AddAddrContext(fromAddr(c), msg.BugIDs[0])
-	if err != nil {
-		return err
-	}
-	if !stringInList(msg.Cc, cc) {
-		msg.Cc = append(msg.Cc, cc)
-	}
-	return forwardEmail(c, msg, missing, []string{cc, msg.Author}, "", msg.MessageID)
 }
 
 // nolint: gocyclo
@@ -747,7 +562,7 @@ func processIncomingEmail(c context.Context, msg *email.Email) error {
 		}
 		reply := groupEmailReplies(replies)
 		if reply == "" && len(msg.Commands) > 0 && len(missingLists) > 0 && !unCc {
-			return forwardEmail(c, msg, missingLists, nil, bugInfo.bugReporting.ID, bugInfo.bugReporting.ExtID)
+			return forwardEmail(c, emailConfig, msg, bugInfo, missingLists)
 		}
 		if reply != "" {
 			return replyTo(c, msg, bugInfo.bugReporting.ID, reply)
@@ -903,7 +718,7 @@ func handleTestCommand(c context.Context, info *bugInfoResult,
 	msg *email.Email, command *email.SingleCommand) string {
 	args := strings.Fields(command.Args)
 	if len(args) != 0 && len(args) != 2 {
-		return replyMalformedSyzTest
+		return fmt.Sprintf("want either no args or 2 args (repo, branch), got %v", len(args))
 	}
 	repo, branch := "", ""
 	if len(args) == 2 {
@@ -1434,8 +1249,8 @@ func missingMailingLists(c context.Context, msg *email.Email, emailConfig *Email
 	return missing
 }
 
-func forwardEmail(c context.Context, msg *email.Email, mailingLists, cc []string,
-	bugID, inReplyTo string) error {
+func forwardEmail(c context.Context, cfg *EmailConfig, msg *email.Email,
+	info *bugInfoResult, mailingLists []string) error {
 	log.Infof(c, "forwarding email: id=%q from=%q to=%q", msg.MessageID, msg.Author, mailingLists)
 	body := fmt.Sprintf(`For archival purposes, forwarding an incoming command email to
 %v.
@@ -1446,26 +1261,22 @@ Subject: %s
 Author: %s
 
 %s`, strings.Join(mailingLists, ", "), msg.Subject, msg.Author, msg.Body)
-	from, err := email.AddAddrContext(fromAddr(c), bugID)
+	from, err := email.AddAddrContext(fromAddr(c), info.bugReporting.ID)
 	if err != nil {
 		return err
 	}
-	return sendEmail(c, &aemail.Message{
-		Sender:  from,
-		To:      mailingLists,
-		Cc:      cc,
-		Subject: email.ForwardedPrefix + msg.Subject,
-		Body:    body,
-		Headers: mail.Header{"In-Reply-To": []string{inReplyTo}},
-	})
+	return sendMailText(c, cfg, msg.Subject, from, mailingLists, info.bugReporting.ExtID, body)
 }
 
-func sendMailText(c context.Context, subject, from string, to []string, replyTo, body string) error {
+func sendMailText(c context.Context, cfg *EmailConfig, subject, from string, to []string, replyTo, body string) error {
 	msg := &aemail.Message{
 		Sender:  from,
 		To:      to,
 		Subject: subject,
 		Body:    body,
+	}
+	if cfg.SubjectPrefix != "" {
+		msg.Subject = cfg.SubjectPrefix + " " + msg.Subject
 	}
 	if replyTo != "" {
 		msg.Headers = mail.Header{"In-Reply-To": []string{replyTo}}

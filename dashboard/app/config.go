@@ -4,11 +4,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/mail"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -55,8 +55,6 @@ type GlobalConfig struct {
 	// List of email addresses which are considered app's own email addresses.
 	// All emails sent from one of these email addresses shall be ignored by the app on reception.
 	ExtraOwnEmailAddresses []string
-	// Emails sent to these addresses are not to be processed like replies to syzbot emails.
-	MonitoredInboxes []*PerInboxConfig
 	// Main part of the URL at which the app is reachable.
 	// This URL is used e.g. to construct HTML links contained in the emails sent by the app.
 	AppURL string
@@ -71,13 +69,6 @@ type GlobalConfig struct {
 	// This bucket is used by the dashboard API handlers.
 	// Configure bucket items auto deletion. Uploaded data will not be deleted by dashboard.
 	UploadBucket string
-}
-
-type PerInboxConfig struct {
-	// Regexp of the inbox which received the message.
-	InboxRe string
-	// The mailing lists that must be also Cc'd for all emails that contain syz commands.
-	ForwardTo []string
 }
 
 // Per-namespace config.
@@ -164,7 +155,6 @@ type ACLItem struct {
 }
 
 const defaultDashboardClientName = "coverage-merger"
-const defaultRegressionThreshold = 50
 
 type CoverageConfig struct {
 	BatchProject        string
@@ -177,15 +167,6 @@ type CoverageConfig struct {
 	// WebGitURI specifies where can we get the kernel file source code directly from AppEngine.
 	// It may be the Git or Gerrit compatible repo.
 	WebGitURI string
-
-	// EmailRegressionsTo species the regressions recipient.
-	// If empty, regression analysis is disabled.
-	EmailRegressionsTo string
-
-	// RegressionThreshold is a minimal basic block coverage drop in a file.
-	// The amount of files in the dir and other factors do not matter.
-	// Defaults to defaultRegressionThreshold.
-	RegressionThreshold int
 }
 
 // DiscussionEmailConfig defines the correspondence between an email and a DiscussionSource.
@@ -200,6 +181,8 @@ type DiscussionEmailConfig struct {
 type SubsystemsConfig struct {
 	// If Service is set, dashboard will use it to infer and recalculate subsystems.
 	Service *subsystem.Service
+	// If all existing subsystem labels must be recalculated, increase this integer.
+	Revision int
 	// Periodic per-subsystem reminders about open bugs.
 	Reminder *BugListReportingConfig
 	// Maps old subsystem names to new ones.
@@ -366,10 +349,12 @@ type CCConfig struct {
 type KcidbConfig struct {
 	// Origin is how this system identified in Kcidb, e.g. "syzbot_foobar".
 	Origin string
-	// RestURI is the REST API endpoint to which the Kcidb client will send data.
-	RestURI string
-	// Token is the authorization token to use for the Kcidb client.
-	Token string
+	// Project is Kcidb GCE project name, e.g. "kernelci-production".
+	Project string
+	// Topic is pubsub topic to publish messages to, e.g. "playground_kernelci_new".
+	Topic string
+	// Credentials is Google application credentials file contents to use for authorization.
+	Credentials []byte
 }
 
 // ThrottleConfig determines how many requests a single client can make in a period of time.
@@ -501,7 +486,6 @@ func checkConfig(cfg *GlobalConfig) {
 		checkNamespace(ns, cfg, namespaces, clientNames)
 	}
 	checkDiscussionEmails(cfg.DiscussionEmails)
-	checkMonitoredInboxes(cfg.MonitoredInboxes)
 	checkACL(cfg.ACL)
 }
 
@@ -519,18 +503,6 @@ func checkACL(acls []*ACLItem) {
 		}
 		if acl.Domain != "" && strings.Count(acl.Domain, "@") != 0 {
 			panic(fmt.Sprintf("authorization for %s isn't possible, delete @", acl.Domain))
-		}
-	}
-}
-
-func checkMonitoredInboxes(list []*PerInboxConfig) {
-	for _, item := range list {
-		_, err := regexp.Compile(item.InboxRe)
-		if err != nil {
-			panic(fmt.Sprintf("invalid InboxRe: %v", err))
-		}
-		if len(item.ForwardTo) == 0 {
-			panic("PerInboxConfig with an empty ForwardTo")
 		}
 	}
 }
@@ -613,16 +585,6 @@ func checkNamespace(ns string, cfg *Config, namespaces, clientNames map[string]b
 	checkKernelRepos(ns, cfg, cfg.Repos)
 	checkNamespaceReporting(ns, cfg)
 	checkSubsystems(ns, cfg)
-	checkCoverageConfig(ns, cfg)
-}
-
-func checkCoverageConfig(ns string, cfg *Config) {
-	if cfg.Coverage == nil || cfg.Coverage.EmailRegressionsTo == "" {
-		return
-	}
-	if _, err := mail.ParseAddress(cfg.Coverage.EmailRegressionsTo); err != nil {
-		panic(fmt.Sprintf("bad cfg.Coverage.EmailRegressionsTo in '%s': %s", ns, err.Error()))
-	}
 }
 
 func checkSubsystems(ns string, cfg *Config) {
@@ -811,15 +773,14 @@ func checkKcidb(ns string, kcidb *KcidbConfig) {
 	if !regexp.MustCompile("^[a-z0-9_]+$").MatchString(kcidb.Origin) {
 		panic(fmt.Sprintf("%v: bad Kcidb origin %q", ns, kcidb.Origin))
 	}
-	if kcidb.RestURI == "" {
-		panic(fmt.Sprintf("%v: empty Kcidb RestURI", ns))
+	if kcidb.Project == "" {
+		panic(fmt.Sprintf("%v: empty Kcidb project", ns))
 	}
-	// Validate RestURI must be a valid URL.
-	if _, err := url.ParseRequestURI(kcidb.RestURI); err != nil {
-		panic(fmt.Sprintf("%v: invalid Kcidb RestURI %q: %v", ns, kcidb.RestURI, err))
+	if kcidb.Topic == "" {
+		panic(fmt.Sprintf("%v: empty Kcidb topic", ns))
 	}
-	if kcidb.Token == "" || len(kcidb.Token) < 8 {
-		panic(fmt.Sprintf("%v: bad Kcidb token %q", ns, kcidb.Token))
+	if !bytes.Contains(kcidb.Credentials, []byte("private_key")) {
+		panic(fmt.Sprintf("%v: empty Kcidb credentials", ns))
 	}
 }
 

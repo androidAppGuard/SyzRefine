@@ -73,10 +73,7 @@ func LoadPartialData(data []byte) (*Config, error) {
 	if err := config.LoadData(data, cfg); err != nil {
 		return nil, err
 	}
-	if err := SetTargets(cfg); err != nil {
-		return nil, err
-	}
-	return cfg, nil
+	return loadPartial(cfg)
 }
 
 func LoadPartialFile(filename string) (*Config, error) {
@@ -84,17 +81,14 @@ func LoadPartialFile(filename string) (*Config, error) {
 	if err := config.LoadFile(filename, cfg); err != nil {
 		return nil, err
 	}
-	if err := SetTargets(cfg); err != nil {
-		return nil, err
-	}
-	return cfg, nil
+	return loadPartial(cfg)
 }
 
 func defaultValues() *Config {
 	return &Config{
 		SSHUser:        "root",
 		Cover:          true,
-		Reproduce:      true,
+		Reproduce:      false,
 		Sandbox:        "none",
 		RPC:            ":0",
 		MaxCrashLogs:   100,
@@ -128,21 +122,21 @@ var (
 	}
 )
 
-func SetTargets(cfg *Config) error {
+func loadPartial(cfg *Config) (*Config, error) {
 	var err error
 	cfg.TargetOS, cfg.TargetVMArch, cfg.TargetArch, err = splitTarget(cfg.RawTarget)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	cfg.Target, err = prog.GetTarget(cfg.TargetOS, cfg.TargetArch)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	cfg.SysTarget = targets.Get(cfg.TargetOS, cfg.TargetVMArch)
 	if cfg.SysTarget == nil {
-		return fmt.Errorf("unsupported OS/arch: %v/%v", cfg.TargetOS, cfg.TargetVMArch)
+		return nil, fmt.Errorf("unsupported OS/arch: %v/%v", cfg.TargetOS, cfg.TargetVMArch)
 	}
-	return nil
+	return cfg, nil
 }
 
 func Complete(cfg *Config) error {
@@ -209,11 +203,6 @@ func Complete(cfg *Config) error {
 	}
 	cfg.initTimeouts()
 	cfg.VMLess = cfg.Type == "none"
-
-	if cfg.VMLess && cfg.Reproduce {
-		return fmt.Errorf("if config param type is none, reproduce must be false")
-	}
-
 	return nil
 }
 
@@ -294,20 +283,6 @@ func (cfg *Config) CompleteKernelDirs() {
 		cfg.KernelBuildSrc = cfg.KernelSrc
 	}
 	cfg.KernelBuildSrc = osutil.Abs(cfg.KernelBuildSrc)
-}
-
-type KernelDirs struct {
-	Src      string
-	Obj      string
-	BuildSrc string
-}
-
-func (cfg *Config) KernelDirs() *KernelDirs {
-	return &KernelDirs{
-		Src:      cfg.KernelSrc,
-		Obj:      cfg.KernelObj,
-		BuildSrc: cfg.KernelBuildSrc,
-	}
 }
 
 func (cfg *Config) checkSSHParams() error {

@@ -4,7 +4,6 @@
 package main
 
 import (
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -37,7 +36,6 @@ import (
 	"github.com/google/syzkaller/prog"
 	_ "github.com/google/syzkaller/sys"
 	"github.com/google/syzkaller/sys/targets"
-	"golang.org/x/sync/errgroup"
 )
 
 // This is especially slightly longer than syzkaller rebuild period.
@@ -89,6 +87,7 @@ type Manager struct {
 	dash           ManagerDashapi
 	debugStorage   bool
 	storage        *asset.Storage
+	stop           chan struct{}
 	debug          bool
 	lastBuild      *dashapi.Build
 	buildFailed    bool
@@ -104,7 +103,8 @@ type ManagerDashapi interface {
 	UploadCommits(commits []dashapi.Commit) error
 }
 
-func createManager(cfg *Config, mgrcfg *ManagerConfig, debug bool) (*Manager, error) {
+func createManager(cfg *Config, mgrcfg *ManagerConfig, stop chan struct{},
+	debug bool) (*Manager, error) {
 	dir := osutil.Abs(filepath.Join("managers", mgrcfg.Name))
 	err := osutil.MkdirAll(dir)
 	if err != nil {
@@ -155,6 +155,7 @@ func createManager(cfg *Config, mgrcfg *ManagerConfig, debug bool) (*Manager, er
 		managercfg:     mgrcfg.managercfg,
 		storage:        assetStorage,
 		debugStorage:   !cfg.AssetStorage.IsEmpty() && cfg.AssetStorage.Debug,
+		stop:           stop,
 		debug:          debug,
 	}
 	// Leave the dashboard interface value as nil if it does not wrap a valid dashboard pointer.
@@ -179,7 +180,7 @@ var testSem = instance.NewSemaphore(1)
 const fuzzingMinutesBeforeCover = 360
 const benchUploadPeriod = 30 * time.Minute
 
-func (mgr *Manager) loop(ctx context.Context) {
+func (mgr *Manager) loop() {
 	lastCommit := ""
 	nextBuildTime := time.Now()
 	var managerRestartTime, artifactUploadTime, benchUploadTime time.Time
@@ -207,20 +208,20 @@ loop:
 	for {
 		if time.Since(nextBuildTime) >= 0 {
 			var rebuildAfter time.Duration
-			lastCommit, latestInfo, rebuildAfter = mgr.pollAndBuild(ctx, lastCommit, latestInfo)
+			lastCommit, latestInfo, rebuildAfter = mgr.pollAndBuild(lastCommit, latestInfo)
 			nextBuildTime = time.Now().Add(rebuildAfter)
 		}
 		if !artifactUploadTime.IsZero() && time.Now().After(artifactUploadTime) {
 			artifactUploadTime = time.Time{}
-			if err := mgr.uploadCoverReport(ctx); err != nil {
+			if err := mgr.uploadCoverReport(); err != nil {
 				mgr.Errorf("failed to upload cover report: %v", err)
 			}
-			if err := mgr.uploadProgramsWithCoverage(ctx); err != nil {
+			if err := mgr.uploadProgramsWithCoverage(); err != nil {
 				mgr.Errorf("failed to upload programs with coverage: %v", err)
 			}
 			// Function uploadCoverStat also forces manager to drop the coverage structures to reduce memory usage.
 			// Should be the last request touching the coverage data.
-			if err := mgr.uploadCoverStat(ctx, fuzzingMinutesBeforeCover); err != nil {
+			if err := mgr.uploadCoverStat(fuzzingMinutesBeforeCover); err != nil {
 				mgr.Errorf("failed to upload coverage stat: %v", err)
 			}
 			if err := mgr.uploadCorpus(); err != nil {
@@ -229,13 +230,13 @@ loop:
 		}
 		if mgr.cfg.BenchUploadPath != "" && time.Now().After(benchUploadTime) {
 			benchUploadTime = time.Now().Add(benchUploadPeriod)
-			if err := mgr.uploadBenchData(ctx); err != nil {
+			if err := mgr.uploadBenchData(); err != nil {
 				mgr.Errorf("failed to upload bench: %v", err)
 			}
 		}
 
 		select {
-		case <-ctx.Done():
+		case <-mgr.stop:
 			break loop
 		default:
 		}
@@ -250,7 +251,7 @@ loop:
 
 		select {
 		case <-ticker.C:
-		case <-ctx.Done():
+		case <-mgr.stop:
 			break loop
 		}
 	}
@@ -272,7 +273,7 @@ func (mgr *Manager) archiveCommit(commit string) {
 	}
 }
 
-func (mgr *Manager) pollAndBuild(ctx context.Context, lastCommit string, latestInfo *BuildInfo) (
+func (mgr *Manager) pollAndBuild(lastCommit string, latestInfo *BuildInfo) (
 	string, *BuildInfo, time.Duration) {
 	rebuildAfter := buildRetryPeriod
 	commit, err := mgr.repo.Poll(mgr.mgrcfg.Repo, mgr.mgrcfg.Branch)
@@ -304,7 +305,7 @@ func (mgr *Manager) pollAndBuild(ctx context.Context, lastCommit string, latestI
 					}
 				}
 				buildSem.Signal()
-			case <-ctx.Done():
+			case <-mgr.stop:
 			}
 		}
 	}
@@ -401,7 +402,7 @@ func (mgr *Manager) build(kernelCommit *vcs.Commit) error {
 			rep.Output = kernelError.Output
 			rep.Recipients = kernelError.Recipients
 		case errors.As(err, &verboseError):
-			rep.Report = []byte(verboseError.Error())
+			rep.Report = []byte(verboseError.Title)
 			rep.Output = verboseError.Output
 		case errors.As(err, &build.InfraError{}):
 			return err
@@ -830,7 +831,7 @@ func (mgr *Manager) uploadBuildAssets(buildInfo *dashapi.Build, assetFolder stri
 	return ret, nil
 }
 
-func (mgr *Manager) httpGET(ctx context.Context, path string) (resp *http.Response, err error) {
+func (mgr *Manager) httpGET(path string) (resp *http.Response, err error) {
 	addr := mgr.managercfg.HTTP
 	if addr != "" && addr[0] == ':' {
 		addr = "127.0.0.1" + addr // in case addr is ":port"
@@ -838,14 +839,10 @@ func (mgr *Manager) httpGET(ctx context.Context, path string) (resp *http.Respon
 	client := &http.Client{
 		Timeout: time.Hour,
 	}
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://%s%s", addr, path), nil)
-	if err != nil {
-		return nil, err
-	}
-	return client.Do(req)
+	return client.Get(fmt.Sprintf("http://%s%s", addr, path))
 }
 
-func (mgr *Manager) uploadCoverReport(ctx context.Context) error {
+func (mgr *Manager) uploadCoverReport() error {
 	directUpload := mgr.managercfg.Cover && mgr.cfg.CoverUploadPath != ""
 	if mgr.storage == nil && !directUpload {
 		// Cover report uploading is disabled.
@@ -857,18 +854,18 @@ func (mgr *Manager) uploadCoverReport(ctx context.Context) error {
 	// Report generation can consume lots of memory. Generate one at a time.
 	select {
 	case <-buildSem.WaitC():
-	case <-ctx.Done():
+	case <-mgr.stop:
 		return nil
 	}
 	defer buildSem.Signal()
 
-	resp, err := mgr.httpGET(context.Background(), "/cover")
+	resp, err := mgr.httpGET("/cover")
 	if err != nil {
 		return fmt.Errorf("failed to get report: %w", err)
 	}
 	defer resp.Body.Close()
 	if directUpload {
-		return uploadFile(context.Background(), nil, mgr.cfg.CoverUploadPath, mgr.name+".html", resp.Body, mgr.cfg.PublishGCS)
+		return uploadFile(mgr.cfg.CoverUploadPath, mgr.name+".html", resp.Body, mgr.cfg.PublishGCS)
 	}
 	// Upload via the asset storage.
 	newAsset, err := mgr.storage.UploadBuildAsset(resp.Body, mgr.name+".html",
@@ -883,14 +880,8 @@ func (mgr *Manager) uploadCoverReport(ctx context.Context) error {
 	return nil
 }
 
-type uploadOptions struct {
-	nameSuffix string
-	publish    bool
-	compress   bool
-}
-
-func (mgr *Manager) uploadCoverJSONLToGCS(ctx context.Context, gcsClient gcs.Client, mgrSrc, gcsDest string,
-	opts uploadOptions, f func(io.Writer, *json.Decoder) error) error {
+func (mgr *Manager) uploadCoverJSONLToGCS(mgrSrc, gcsDest string, curTime time.Time, publish bool,
+	f func(io.Writer, *json.Decoder) error) error {
 	if !mgr.managercfg.Cover || gcsDest == "" {
 		return nil
 	}
@@ -899,13 +890,12 @@ func (mgr *Manager) uploadCoverJSONLToGCS(ctx context.Context, gcsClient gcs.Cli
 	// TODO: remove it once #4585 (symbolization tuning) is closed
 	select {
 	case <-buildSem.WaitC():
-	case <-ctx.Done():
+	case <-mgr.stop:
 		return nil
 	}
 	defer buildSem.Signal()
 
-	eg, egCtx := errgroup.WithContext(ctx)
-	resp, err := mgr.httpGET(egCtx, mgrSrc)
+	resp, err := mgr.httpGET(mgrSrc)
 	if err != nil {
 		return fmt.Errorf("failed to httpGet %s: %w", mgrSrc, err)
 	}
@@ -918,47 +908,36 @@ func (mgr *Manager) uploadCoverJSONLToGCS(ctx context.Context, gcsClient gcs.Cli
 	}
 
 	pr, pw := io.Pipe()
-	eg.Go(func() error {
-		defer pw.Close()
-		var w io.Writer
-		w = pw
-		if opts.compress {
-			gzw := gzip.NewWriter(pw)
-			defer gzw.Close()
-			w = gzw
-		}
+	defer pr.Close()
+	go func() {
 		decoder := json.NewDecoder(resp.Body)
 		for decoder.More() {
-			if err := f(w, decoder); err != nil {
-				return fmt.Errorf("callback: %w", err)
+			if err := f(pw, decoder); err != nil {
+				pw.CloseWithError(fmt.Errorf("callback: %w", err))
+				return
 			}
 		}
-		return nil
-	})
-	eg.Go(func() error {
-		defer pr.Close()
-		fileName := fmt.Sprintf("%s/%s%s.jsonl", mgr.mgrcfg.DashboardClient, mgr.name, opts.nameSuffix)
-		if err := uploadFile(egCtx, gcsClient, gcsDest, fileName, pr, opts.publish); err != nil {
-			return fmt.Errorf("uploadFile: %w", err)
-		}
-		return nil
-	})
-	return eg.Wait()
+		pw.Close()
+	}()
+	fileName := fmt.Sprintf("%s/%s-%s-%d-%d.jsonl",
+		mgr.mgrcfg.DashboardClient,
+		mgr.name, curTime.Format(time.DateOnly),
+		curTime.Hour(), curTime.Minute())
+	if err := uploadFile(gcsDest, fileName, pr, publish); err != nil {
+		return fmt.Errorf("failed to uploadFileGCS(): %w", err)
+	}
+	return nil
 }
 
-func (mgr *Manager) uploadCoverStat(ctx context.Context, fuzzingMinutes int) error {
+func (mgr *Manager) uploadCoverStat(fuzzingMinutes int) error {
 	// Coverage report generation consumes and caches lots of memory.
 	// In the syz-ci context report generation won't be used after this point,
 	// so tell manager to flush report generator.
 	curTime := time.Now()
-	if err := mgr.uploadCoverJSONLToGCS(ctx, nil,
-		"/cover?jsonl=1&flush=1",
+	if err := mgr.uploadCoverJSONLToGCS("/cover?jsonl=1&flush=1",
 		mgr.cfg.CoverPipelinePath,
-		uploadOptions{
-			nameSuffix: time.Now().Format("-2006-01-02-15-04"),
-			publish:    false,
-			compress:   false,
-		},
+		curTime,
+		false,
 		func(w io.Writer, dec *json.Decoder) error {
 			var covInfo cover.CoverageInfo
 			if err := dec.Decode(&covInfo); err != nil {
@@ -984,15 +963,11 @@ func (mgr *Manager) uploadCoverStat(ctx context.Context, fuzzingMinutes int) err
 	return nil
 }
 
-func (mgr *Manager) uploadProgramsWithCoverage(ctx context.Context) error {
-	if err := mgr.uploadCoverJSONLToGCS(ctx, nil,
-		"/coverprogs?jsonl=1",
+func (mgr *Manager) uploadProgramsWithCoverage() error {
+	if err := mgr.uploadCoverJSONLToGCS("/coverprogs?jsonl=1",
 		mgr.cfg.CoverProgramsPath,
-		uploadOptions{
-			nameSuffix: "",
-			publish:    mgr.cfg.PublishGCS,
-			compress:   true,
-		},
+		time.Now(),
+		mgr.cfg.PublishGCS,
 		func(w io.Writer, dec *json.Decoder) error {
 			var programCoverage cover.ProgramCoverage
 			if err := dec.Decode(&programCoverage); err != nil {
@@ -1019,10 +994,10 @@ func (mgr *Manager) uploadCorpus() error {
 		return err
 	}
 	defer f.Close()
-	return uploadFile(context.Background(), nil, mgr.cfg.CorpusUploadPath, mgr.name+"-corpus.db", f, mgr.cfg.PublishGCS)
+	return uploadFile(mgr.cfg.CorpusUploadPath, mgr.name+"-corpus.db", f, mgr.cfg.PublishGCS)
 }
 
-func (mgr *Manager) uploadBenchData(ctx context.Context) error {
+func (mgr *Manager) uploadBenchData() error {
 	if mgr.lastRestarted.IsZero() {
 		return nil
 	}
@@ -1037,7 +1012,7 @@ func (mgr *Manager) uploadBenchData(ctx context.Context) error {
 		return fmt.Errorf("failed to open bench file: %w", err)
 	}
 	defer f.Close()
-	err = uploadFile(ctx, nil, mgr.cfg.BenchUploadPath+"/"+mgr.name,
+	err = uploadFile(mgr.cfg.BenchUploadPath+"/"+mgr.name,
 		mgr.lastRestarted.Format("2006-01-02_15h.json"), f, false)
 	if err != nil {
 		return fmt.Errorf("failed to upload the bench file: %w", err)
@@ -1045,7 +1020,7 @@ func (mgr *Manager) uploadBenchData(ctx context.Context) error {
 	return nil
 }
 
-func uploadFile(ctx context.Context, gcsClient gcs.Client, dstPath, name string, file io.Reader, publish bool) error {
+func uploadFile(dstPath, name string, file io.Reader, publish bool) error {
 	URL, err := url.Parse(dstPath)
 	if err != nil {
 		return fmt.Errorf("failed to parse upload path: %w", err)
@@ -1055,16 +1030,13 @@ func uploadFile(ctx context.Context, gcsClient gcs.Client, dstPath, name string,
 	log.Logf(0, "uploading %v to %v", name, URLStr)
 	if strings.HasPrefix(URLStr, "http://") ||
 		strings.HasPrefix(URLStr, "https://") {
-		if gcsClient != nil {
-			return fmt.Errorf("gcsClient is expected to be nil for the http* requests")
-		}
-		return uploadFileHTTPPut(ctx, URLStr, file)
+		return uploadFileHTTPPut(URLStr, file)
 	}
-	return gcs.UploadFile(ctx, file, URLStr, gcs.UploadOptions{Publish: publish, GCSClientMock: gcsClient})
+	return gcs.UploadFile(context.Background(), file, URLStr, gcs.UploadOptions{Publish: publish})
 }
 
-func uploadFileHTTPPut(ctx context.Context, URL string, file io.Reader) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, URL, file)
+func uploadFileHTTPPut(URL string, file io.Reader) error {
+	req, err := http.NewRequest(http.MethodPut, URL, file)
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP PUT request: %w", err)
 	}
@@ -1074,7 +1046,7 @@ func uploadFileHTTPPut(ctx context.Context, URL string, file io.Reader) error {
 		return fmt.Errorf("failed to perform HTTP PUT request: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+	if !(resp.StatusCode >= 200 && resp.StatusCode <= 299) {
 		return fmt.Errorf("HTTP PUT failed with status code: %v", resp.StatusCode)
 	}
 	return nil
@@ -1082,16 +1054,6 @@ func uploadFileHTTPPut(ctx context.Context, URL string, file io.Reader) error {
 
 // Errorf logs non-fatal error and sends it to dashboard.
 func (mgr *Manager) Errorf(msg string, args ...interface{}) {
-	for _, arg := range args {
-		err, _ := arg.(error)
-		if err == nil {
-			continue
-		}
-		if errors.Is(err, context.Canceled) {
-			// Context cancelation-related errors only create unnecessary noise.
-			return
-		}
-	}
 	log.Errorf(mgr.name+": "+msg, args...)
 	if mgr.dash != nil {
 		mgr.dash.LogError(mgr.name, msg, args...)

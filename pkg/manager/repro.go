@@ -29,30 +29,24 @@ type Crash struct {
 	FromHub       bool // this crash was created based on a repro from syz-hub
 	FromDashboard bool // .. or from dashboard
 	Manual        bool
-	FullRepro     bool // used by the diff fuzzer to do a full scale reproduction
 	*report.Report
-	TailReports []*report.Report
 }
 
 func (c *Crash) FullTitle() string {
-	suffix := ""
-	if c.FullRepro {
-		suffix = " (full)"
-	}
 	if c.Report.Title != "" {
-		return c.Report.Title + suffix
+		return c.Report.Title
 	}
 	// Just use some unique, but stable titles.
 	if c.FromDashboard {
-		return fmt.Sprintf("dashboard crash %p%s", c, suffix)
+		return fmt.Sprintf("dashboard crash %p", c)
 	} else if c.FromHub {
-		return fmt.Sprintf("crash from hub %p%s", c, suffix)
+		return fmt.Sprintf("crash from hub %p", c)
 	}
 	panic("the crash is expected to have a report")
 }
 
 type ReproManagerView interface {
-	RunRepro(ctx context.Context, crash *Crash) *ReproResult
+	RunRepro(crash *Crash) *ReproResult
 	NeedRepro(crash *Crash) bool
 	ResizeReproPool(size int)
 }
@@ -145,10 +139,6 @@ func (r *ReproLoop) popCrash() *Crash {
 	defer r.mu.Unlock()
 
 	newBetter := func(base, new *Crash) bool {
-		// If diff fuzzed has requested a full reproduction, do it first.
-		if base.FullRepro != new.FullRepro {
-			return new.FullRepro
-		}
 		// The more times we failed, the less likely we are to actually
 		// find a reproducer. Give preference to not yet attempted repro runs.
 		baseTitle, newTitle := base.FullTitle(), new.FullTitle()
@@ -184,8 +174,6 @@ func (r *ReproLoop) popCrash() *Crash {
 }
 
 func (r *ReproLoop) Loop(ctx context.Context) {
-	defer log.Logf(1, "repro loop terminated")
-
 	count := 0
 	for ; r.calculateReproVMs(count+1) <= r.reproVMs; count++ {
 		r.parallel <- struct{}{}
@@ -199,16 +187,11 @@ func (r *ReproLoop) Loop(ctx context.Context) {
 		crash := r.popCrash()
 		for {
 			if crash != nil && !r.mgr.NeedRepro(crash) {
-				log.Logf(1, "reproduction of %q aborted: it's no longer needed", crash.FullTitle())
+				crash = nil
 				// Now we might not need that many VMs.
 				r.mu.Lock()
 				r.adjustPoolSizeLocked()
 				r.mu.Unlock()
-
-				// Immediately check if there was any other crash in the queue, so that we fall back
-				// to waiting on pingQueue only if there were really no other crashes in the queue.
-				crash = r.popCrash()
-				continue
 			}
 			if crash != nil {
 				break
@@ -239,7 +222,7 @@ func (r *ReproLoop) Loop(ctx context.Context) {
 		go func() {
 			defer wg.Done()
 
-			r.handle(ctx, crash)
+			r.handle(crash)
 
 			r.mu.Lock()
 			delete(r.reproducing, title)
@@ -247,11 +230,7 @@ func (r *ReproLoop) Loop(ctx context.Context) {
 			r.mu.Unlock()
 
 			r.parallel <- struct{}{}
-			// If the context is cancelled, no one is listening on pingQueue.
-			select {
-			case r.pingQueue <- struct{}{}:
-			default:
-			}
+			r.pingQueue <- struct{}{}
 		}()
 	}
 }
@@ -265,10 +244,10 @@ func (r *ReproLoop) calculateReproVMs(repros int) int {
 	return (repros*4 + 2) / 3
 }
 
-func (r *ReproLoop) handle(ctx context.Context, crash *Crash) {
+func (r *ReproLoop) handle(crash *Crash) {
 	log.Logf(0, "start reproducing '%v'", crash.FullTitle())
 
-	res := r.mgr.RunRepro(ctx, crash)
+	res := r.mgr.RunRepro(crash)
 
 	crepro := false
 	title := ""

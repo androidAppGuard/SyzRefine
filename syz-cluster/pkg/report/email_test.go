@@ -12,17 +12,15 @@ import (
 	"testing"
 
 	"github.com/google/syzkaller/syz-cluster/pkg/api"
-	"github.com/google/syzkaller/syz-cluster/pkg/app"
 	"github.com/stretchr/testify/assert"
 )
 
 var flagWrite = flag.Bool("write", false, "overwrite out.txt files")
 
 func TestRender(t *testing.T) {
-	config := &app.EmailConfig{
+	config := &Config{
 		Name:         "syzbot",
 		DocsLink:     "http://docs/link",
-		CreditEmail:  "credit@email.com",
 		SupportEmail: "support@email.com",
 	}
 	flag.Parse()
@@ -64,7 +62,7 @@ func TestRender(t *testing.T) {
 					} else {
 						expected, err := os.ReadFile(outPath)
 						assert.NoError(t, err)
-						assert.Equal(t, string(expected), string(output))
+						assert.Equal(t, expected, output)
 					}
 				})
 			}

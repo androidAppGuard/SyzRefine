@@ -32,38 +32,11 @@ $(warning $(RED)run command via tools/syz-env for best compatibility, see:$(RESE
 $(warning $(RED)https://github.com/google/syzkaller/blob/master/docs/contributing.md#using-syz-env$(RESET))
 endif
 
-GITREV=$(shell git rev-parse HEAD)
-ifeq ("$(shell git diff --shortstat)", "")
-	REV=$(GITREV)
-else
-	REV=$(GITREV)+
-endif
-GITREVDATE=$(shell git log -n 1 --format="%cd" --date=format:%Y%m%d-%H%M%S)
-
-# Don't generate symbol table and DWARF debug info.
-# Reduces build time and binary sizes considerably.
-# That's only needed if you use gdb or nm.
-# If you need that, build manually with DEBUG=true env.
-GLFLAGS :=
-GGFLAGS :=
-ifeq ("$(DEBUG)", "true")
-	GGFLAGS := -gcflags="all=-N -l"
-else
-	GLFLAGS := -s -w
-endif
-GOFLAGS := -ldflags="$(GLFLAGS) -X github.com/google/syzkaller/prog.GitRevision=$(REV) -X github.com/google/syzkaller/prog.gitRevisionDate=$(GITREVDATE)" $(GGFLAGS)
-ifneq ("$(GOTAGS)", "")
-	GOFLAGS += " -tags=$(GOTAGS)"
-endif
-
-GOHOSTFLAGS ?= $(GOFLAGS)
-GOTARGETFLAGS ?= $(GOFLAGS)
-
 ENV := $(subst \n,$(newline),$(shell CI=$(CI)\
 	SOURCEDIR=$(SOURCEDIR) HOSTOS=$(HOSTOS) HOSTARCH=$(HOSTARCH) \
 	TARGETOS=$(TARGETOS) TARGETARCH=$(TARGETARCH) TARGETVMARCH=$(TARGETVMARCH) \
 	SYZ_CLANG=$(SYZ_CLANG) \
-	go run $(GOHOSTFLAGS) tools/syz-make/make.go))
+	go run tools/syz-make/make.go))
 # Uncomment in case of emergency.
 # $(info $(ENV))
 $(eval $(ENV))
@@ -88,6 +61,26 @@ TARGETGOARCH := $(TARGETVMARCH)
 export GO111MODULE=on
 export GOBIN=$(shell pwd -P)/bin
 
+GITREV=$(shell git rev-parse HEAD)
+ifeq ("$(shell git diff --shortstat)", "")
+	REV=$(GITREV)
+else
+	REV=$(GITREV)+
+endif
+GITREVDATE=$(shell git log -n 1 --format="%cd" --date=format:%Y%m%d-%H%M%S)
+
+# Don't generate symbol table and DWARF debug info.
+# Reduces build time and binary sizes considerably.
+# That's only needed if you use gdb or nm.
+# If you need that, build manually without these flags.
+GOFLAGS := "-ldflags=-s -w -X github.com/google/syzkaller/prog.GitRevision=$(REV) -X 'github.com/google/syzkaller/prog.gitRevisionDate=$(GITREVDATE)'"
+ifneq ("$(GOTAGS)", "")
+	GOFLAGS += " -tags=$(GOTAGS)"
+endif
+
+GOHOSTFLAGS ?= $(GOFLAGS)
+GOTARGETFLAGS ?= $(GOFLAGS)
+
 ifeq ("$(TARGETOS)", "test")
 	TARGETGOOS := $(HOSTOS)
 	TARGETGOARCH := $(HOSTARCH)
@@ -104,7 +97,7 @@ ifeq ("$(TARGETOS)", "trusty")
 endif
 
 .PHONY: all clean host target \
-	manager executor kfuzztest ci hub \
+	manager executor ci hub \
 	execprog mutate prog2c trace2syz repro upgrade db \
 	usbgen symbolize cover kconf syz-build crush \
 	bin/syz-extract bin/syz-fmt \
@@ -118,7 +111,7 @@ endif
 
 all: host target
 host: manager repro mutate prog2c db upgrade
-target: execprog executor check_syzos
+target: execprog executor
 
 executor: descriptions
 ifeq ($(TARGETOS),fuchsia)
@@ -150,7 +143,7 @@ endif
 # syz-sysgen generates them all at once, so we can't make each of them an independent target.
 .PHONY: descriptions
 descriptions:
-	go list -f '{{.Stale}}' $(GOHOSTFLAGS) ./sys/syz-sysgen | grep -q false || go install $(GOHOSTFLAGS) ./sys/syz-sysgen
+	go list -f '{{.Stale}}' ./sys/syz-sysgen | grep -q false || go install ./sys/syz-sysgen
 	$(MAKE) .descriptions
 
 .descriptions: sys/*/*.txt sys/*/*.const bin/syz-sysgen
@@ -217,14 +210,6 @@ syz-build:
 bisect: descriptions
 	GOOS=$(HOSTOS) GOARCH=$(HOSTARCH) $(HOSTGO) build $(GOHOSTFLAGS) -o ./bin/syz-bisect github.com/google/syzkaller/tools/syz-bisect
 
-ifeq ($(HOSTOS), linux)
-kfuzztest: descriptions
-	GOOS=$(HOSTOS) GOARCH=$(HOSTARCH) $(HOSTGO) build $(GOHOSTFLAGS) -o ./bin/syz-kfuzztest github.com/google/syzkaller/syz-kfuzztest
-else
-kfuzztest:
-	@echo "Skipping kfuzztest build (it's Linux-only)"
-endif
-
 verifier: descriptions
 	# TODO: switch syz-verifier to use syz-executor.
 	# GOOS=$(HOSTOS) GOARCH=$(HOSTARCH) $(HOSTGO) build $(GOHOSTFLAGS) -o ./bin/syz-verifier github.com/google/syzkaller/syz-verifier
@@ -232,6 +217,11 @@ verifier: descriptions
 # `extract` extracts const files from various kernel sources, and may only
 # re-generate parts of files.
 extract: bin/syz-extract
+ifeq ($(TARGETOS),fuchsia)
+	$(MAKE) generate_fidl TARGETARCH=amd64
+	$(MAKE) generate_fidl TARGETARCH=arm64
+else
+endif
 	bin/syz-extract -build -os=$(TARGETOS) -sourcedir=$(SOURCEDIR) $(FILES)
 
 bin/syz-extract:
@@ -246,27 +236,34 @@ generate:
 	$(MAKE) format
 
 generate_go: format_cpp
-	$(GO) generate ./...
-	$(GO) tool mockery --log-level="error"
+	$(GO) generate ./executor ./pkg/ifuzz ./pkg/build ./pkg/rpcserver
+	$(GO) generate ./vm/proxyapp
+	$(GO) generate ./pkg/coveragedb
+	$(GO) generate ./pkg/covermerger
+	$(GO) generate ./pkg/gcs
 
 generate_rpc:
 	flatc -o pkg/flatrpc --warnings-as-errors --gen-object-api --filename-suffix "" --go --gen-onefile --go-namespace flatrpc pkg/flatrpc/flatrpc.fbs
 	flatc -o pkg/flatrpc --warnings-as-errors --gen-object-api --filename-suffix "" --cpp --scoped-enums pkg/flatrpc/flatrpc.fbs
 	$(GO) fmt ./pkg/flatrpc/flatrpc.go
 
+generate_fidl:
+ifeq ($(TARGETOS),fuchsia)
+	$(HOSTGO) generate ./sys/fuchsia
+	$(MAKE) format_sys
+else
+endif
+
 generate_trace2syz:
 	(cd tools/syz-trace2syz/parser; ragel -Z -G2 -o lex.go straceLex.rl)
 	(cd tools/syz-trace2syz/parser; goyacc -o strace.go -p Strace -v="" strace.y)
 
-format: format_go format_cpp format_sys format_keep_sorted
+format: format_go format_cpp format_sys
 
 format_go:
 	$(GO) fmt ./...
-
-format_keep_sorted:
 	$(HOSTGO) install github.com/google/keep-sorted
 	find . -name "*.go" -exec bin/keep-sorted {} \;
-	find . -name "*.yml" -exec bin/keep-sorted {} \;
 
 format_cpp:
 	clang-format --style=file -i executor/*.cc executor/*.h \
@@ -281,21 +278,25 @@ bin/syz-fmt:
 	$(HOSTGO) build $(GOHOSTFLAGS) -o $@ ./tools/syz-fmt
 
 configs: kconf
-	bin/syz-kconf -config dashboard/config/linux/main.yml -sourcedir $(SOURCEDIR) -instance=$(INSTANCE)
+	bin/syz-kconf -config dashboard/config/linux/main.yml -sourcedir $(SOURCEDIR)
 
 tidy: descriptions
 	clang-tidy -quiet -header-filter=executor/[^_].* -warnings-as-errors=* \
-		-checks=-*,misc-definitions-in-headers,bugprone-macro-parentheses,clang-analyzer-*,-clang-analyzer-security.insecureAPI*,-clang-analyzer-optin.performance*,-clang-analyzer-optin.core.EnumCastOutOfRange \
+		-checks=-*,misc-definitions-in-headers,bugprone-macro-parentheses,clang-analyzer-*,-clang-analyzer-security.insecureAPI*,-clang-analyzer-optin.performance* \
 		-extra-arg=-DGOOS_$(TARGETOS)=1 -extra-arg=-DGOARCH_$(TARGETARCH)=1 \
 		-extra-arg=-DHOSTGOOS_$(HOSTOS)=1 -extra-arg=-DGIT_REVISION=\"$(REV)\" \
 		--extra-arg=-I. --extra-arg=-Iexecutor/_include \
 		--extra-arg=-std=c++17 \
 		executor/*.cc
 
+ifdef CI
+  LINT-FLAGS := --out-format github-actions
+endif
+
 lint:
-	CGO_ENABLED=1 $(HOSTGO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint
+	CGO_ENABLED=1 $(HOSTGO) install github.com/golangci/golangci-lint/cmd/golangci-lint
 	CGO_ENABLED=1 $(HOSTGO) build -buildmode=plugin -o bin/syz-linter.so ./tools/syz-linter
-	bin/golangci-lint run ./...
+	bin/golangci-lint run $(LINT-FLAGS) ./...
 
 presubmit:
 	$(MAKE) presubmit_aux
@@ -434,9 +435,6 @@ check_links:
 
 check_html:
 	./tools/check-html.sh
-
-check_syzos: executor
-	./tools/check-syzos.sh 2>/dev/null
 
 # Check that the diff is empty. This is meant to be executed after generating
 # and formatting the code to make sure that everything is committed.

@@ -1052,7 +1052,6 @@ func incomingCommandUpdate(c context.Context, now time.Time, cmd *dashapi.BugUpd
 	return true, "", nil
 }
 
-// nolint:revive
 func incomingCommandCmd(c context.Context, now time.Time, cmd *dashapi.BugUpdate, bug, dup *Bug,
 	bugReporting *BugReporting, final bool, stateEnt *ReportingStateEntry) (bool, string, error) {
 	switch cmd.Status {
@@ -1288,12 +1287,11 @@ func findCrashForBug(c context.Context, bug *Bug) (*Crash, *db.Key, error) {
 		return nil, nil, fmt.Errorf("no crashes")
 	}
 	crash, key := crashes[0], keys[0]
-	switch bug.HeadReproLevel {
-	case ReproLevelC:
+	if bug.HeadReproLevel == ReproLevelC {
 		if crash.ReproC == 0 {
 			log.Errorf(c, "bug '%v': has C repro, but crash without C repro", bug.Title)
 		}
-	case ReproLevelSyz:
+	} else if bug.HeadReproLevel == ReproLevelSyz {
 		if crash.ReproSyz == 0 {
 			log.Errorf(c, "bug '%v': has syz repro, but crash without syz repro", bug.Title)
 		}

@@ -52,7 +52,6 @@ package main
 // modification time allows us to understand if we need to rebuild after a restart.
 
 import (
-	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -282,10 +281,10 @@ func main() {
 		}()
 	}
 
-	ctx, stop := context.WithCancel(context.Background())
+	stop := make(chan struct{})
 	var managers []*Manager
 	for _, mgrcfg := range cfg.Managers {
-		mgr, err := createManager(cfg, mgrcfg, *flagDebug)
+		mgr, err := createManager(cfg, mgrcfg, stop, *flagDebug)
 		if err != nil {
 			log.Errorf("failed to create manager %v: %v", mgrcfg.Name, err)
 			continue
@@ -301,7 +300,7 @@ func main() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				mgr.loop(ctx)
+				mgr.loop()
 			}()
 		}
 	}
@@ -309,31 +308,28 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to create dashapi connection %v", err)
 	}
-	ctxJobs, stopJobs := context.WithCancel(ctx)
-	wgJobs := sync.WaitGroup{}
-	jp.startLoop(ctxJobs, &wgJobs)
+	stopJobs := jp.startLoop(&wg)
 
 	// For testing. Racy. Use with care.
 	http.HandleFunc("/upload_cover", func(w http.ResponseWriter, r *http.Request) {
 		for _, mgr := range managers {
-			if err := mgr.uploadCoverReport(ctx); err != nil {
-				fmt.Fprintf(w, "failed for %v: %v <br>\n", mgr.name, err)
+			if err := mgr.uploadCoverReport(); err != nil {
+				w.Write([]byte(fmt.Sprintf("failed for %v: %v <br>\n", mgr.name, err)))
 				return
 			}
-			fmt.Fprintf(w, "upload cover for %v <br>\n", mgr.name)
+			w.Write([]byte(fmt.Sprintf("upload cover for %v <br>\n", mgr.name)))
 		}
 	})
 
 	wg.Add(1)
-	go deprecateAssets(ctx, cfg, &wg)
+	go deprecateAssets(cfg, stop, &wg)
 
 	select {
 	case <-shutdownPending:
 	case <-updatePending:
 	}
-	stopJobs()
-	wgJobs.Wait()
-	stop()
+	stopJobs() // Gracefully wait for the running jobs to finish.
+	close(stop)
 	wg.Wait()
 
 	select {
@@ -343,7 +339,7 @@ func main() {
 	}
 }
 
-func deprecateAssets(ctx context.Context, cfg *Config, wg *sync.WaitGroup) {
+func deprecateAssets(cfg *Config, stop chan struct{}, wg *sync.WaitGroup) {
 	defer wg.Done()
 	if cfg.DashboardAddr == "" || cfg.AssetStorage.IsEmpty() ||
 		!cfg.AssetStorage.DoDeprecation {
@@ -363,7 +359,7 @@ loop:
 	for {
 		const sleepDuration = 6 * time.Hour
 		select {
-		case <-ctx.Done():
+		case <-stop:
 			break loop
 		case <-time.After(sleepDuration):
 		}

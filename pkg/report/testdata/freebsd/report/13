@@ -1,5 +1,4 @@
 TITLE: panic: pfi_dynaddr_setup: non-NULL dyn
-TYPE: DoS
 
 panic: pfi_dynaddr_setup: dyn is 0x8000
 cpuid = 1

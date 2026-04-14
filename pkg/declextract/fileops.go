@@ -7,84 +7,35 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-
-	"github.com/google/syzkaller/pkg/ast"
 )
 
-const (
-	ioctlCmdArg = 1
-	ioctlArgArg = 2
-)
+// TODO: also emit interface entry for file_operations.
 
 func (ctx *context) serializeFileOps() {
 	for _, ioctl := range ctx.Ioctls {
 		ctx.ioctls[ioctl.Name] = ioctl.Type
 	}
-	uniqueFuncs := ctx.resolveFopsCallbacks()
-	fopsToFiles := ctx.mapFopsToFiles(uniqueFuncs)
+	fopsToFiles := ctx.mapFopsToFiles()
 	for _, fops := range ctx.FileOps {
 		files := fopsToFiles[fops]
-		canGenerate := Tristate(len(files) != 0)
-		for _, op := range []*Function{fops.open, fops.read, fops.write, fops.mmap} {
-			if op == nil {
-				continue
-			}
-			if op == fops.open && (uniqueFuncs[fops.read] == 1 || uniqueFuncs[fops.write] == 1 ||
-				uniqueFuncs[fops.mmap] == 1 || uniqueFuncs[fops.ioctl] == 1) {
-				continue
-			}
-			ctx.noteInterface(&Interface{
-				Type:             IfaceFileop,
-				Name:             op.Name,
-				Func:             op.Name,
-				Files:            []string{op.File},
-				AutoDescriptions: canGenerate,
-			})
-		}
-		var ioctlCmds []string
-		if fops.ioctl != nil {
-			ioctlCmds = ctx.inferCommandVariants(fops.Ioctl, fops.SourceFile, ioctlCmdArg)
-			for _, cmd := range ioctlCmds {
-				ctx.noteInterface(&Interface{
-					Type:             IfaceIoctl,
-					Name:             cmd,
-					IdentifyingConst: cmd,
-					Files:            []string{fops.ioctl.File},
-					Func:             fops.Ioctl,
-					AutoDescriptions: canGenerate,
-					scopeArg:         ioctlCmdArg,
-					scopeVal:         cmd,
-				})
-			}
-			if len(ioctlCmds) == 0 {
-				ctx.noteInterface(&Interface{
-					Type:             IfaceIoctl,
-					Name:             fops.Ioctl,
-					Files:            []string{fops.ioctl.File},
-					Func:             fops.Ioctl,
-					AutoDescriptions: canGenerate,
-				})
-			}
-		}
 		if len(files) == 0 {
 			continue // each unmapped entry means some code we don't know how to cover yet
 		}
-		ctx.createFops(fops, files, ioctlCmds)
+		ctx.createFops(fops, files)
 	}
 }
 
-func (ctx *context) createFops(fops *FileOps, files, ioctlCmds []string) {
-	name := ctx.uniqualize("fops name", fops.Name)
+func (ctx *context) createFops(fops *FileOps, files []string) {
 	// If it has only open, then emit only openat that returns generic fd.
 	fdt := "fd"
-	if len(fops.ops) > 1 || fops.Open == "" {
-		fdt = fmt.Sprintf("fd_%v", name)
+	if len(fops.ops()) > 1 || fops.Open == "" {
+		fdt = fmt.Sprintf("fd_%v", fops.Name)
 		ctx.fmt("resource %v[fd]\n", fdt)
 	}
-	suffix := autoSuffix + "_" + name
+	suffix := autoSuffix + "_" + fops.Name
 	fileFlags := fmt.Sprintf("\"%s\"", files[0])
 	if len(files) > 1 {
-		fileFlags = fmt.Sprintf("%v_files", name)
+		fileFlags = fmt.Sprintf("%v_files", fops.Name)
 		ctx.fmt("%v = ", fileFlags)
 		for i, file := range files {
 			ctx.fmt("%v \"%v\"", comma(i), file)
@@ -104,17 +55,17 @@ func (ctx *context) createFops(fops *FileOps, files, ioctlCmds []string) {
 			" flags flags[mmap_flags], fd %v, offset fileoff)\n", suffix, fdt)
 	}
 	if fops.Ioctl != "" {
-		ctx.createIoctls(fops, ioctlCmds, suffix, fdt)
+		ctx.createIoctls(fops, suffix, fdt)
 	}
 	ctx.fmt("\n")
 }
 
-func (ctx *context) createIoctls(fops *FileOps, ioctlCmds []string, suffix, fdt string) {
+func (ctx *context) createIoctls(fops *FileOps, suffix, fdt string) {
 	const defaultArgType = "ptr[in, array[int8]]"
-	cmds := ctx.inferCommandVariants(fops.Ioctl, fops.SourceFile, ioctlCmdArg)
+	cmds := ctx.inferCommandVariants(fops.Ioctl, fops.SourceFile, 1)
 	if len(cmds) == 0 {
-		retType := ctx.inferReturnType(fops.Ioctl, fops.SourceFile, -1, "")
-		argType := ctx.inferArgType(fops.Ioctl, fops.SourceFile, ioctlArgArg, -1, "")
+		retType := ctx.inferReturnType(fops.Ioctl, fops.SourceFile)
+		argType := ctx.inferArgType(fops.Ioctl, fops.SourceFile, 2)
 		if argType == "" {
 			argType = defaultArgType
 		}
@@ -129,63 +80,57 @@ func (ctx *context) createIoctls(fops *FileOps, ioctlCmds []string, suffix, fdt 
 				Type: typ,
 			}
 			argType = ctx.fieldType(f, nil, "", false)
-		} else {
-			argType = ctx.inferArgType(fops.Ioctl, fops.SourceFile, ioctlArgArg, ioctlCmdArg, cmd)
-			if argType == "" {
-				argType = defaultArgType
-			}
 		}
-		retType := ctx.inferReturnType(fops.Ioctl, fops.SourceFile, ioctlCmdArg, cmd)
 		name := ctx.uniqualize("ioctl cmd", cmd)
-		ctx.fmt("ioctl%v_%v(fd %v, cmd const[%v], arg %v) %v\n",
-			autoSuffix, name, fdt, cmd, argType, retType)
+		ctx.fmt("ioctl%v_%v(fd %v, cmd const[%v], arg %v)\n",
+			autoSuffix, name, fdt, cmd, argType)
 	}
 }
 
 // mapFopsToFiles maps file_operations to actual file names.
-func (ctx *context) mapFopsToFiles(uniqueFuncs map[*Function]int) map[*FileOps][]string {
+func (ctx *context) mapFopsToFiles() map[*FileOps][]string {
 	// Mapping turns out to be more of an art than science because
 	// (1) there are lots of common callback functions that present in lots of file_operations
 	// in different combinations, (2) some file operations are updated at runtime,
 	// (3) some file operations are chained at runtime and we see callbacks from several
 	// of them at the same time, (4) some callbacks are not reached (e.g. debugfs files
 	// always have write callback, but can be installed without write permission).
-	// If a callback that is present in only 1 file_operations is matched,
-	// it's a stronger prioritization signal for that file_operations.
 
-	funcToFops := make(map[*Function][]*FileOps)
+	// uniqueFuncs hold callback functions that are present in only 1 file_operations,
+	// if such a callback is matched, it's a stronger prioritization signal for that file_operations.
+	uniqueFuncs := make(map[string]int)
+	funcToFops := make(map[string][]*FileOps)
 	for _, fops := range ctx.FileOps {
-		for _, fn := range fops.ops {
+		for _, fn := range fops.ops() {
 			funcToFops[fn] = append(funcToFops[fn], fops)
+			uniqueFuncs[fn]++
 		}
 	}
+	// matchedFuncs holds functions are present in any file_operations callbacks
+	// (lots of coverage is not related to any file_operations at all).
+	matchedFuncs := make(map[string]bool)
 	// Maps file names to set of all callbacks that operations on the file has reached.
-	fileToFuncs := make(map[string]map[*Function]bool)
+	fileToFuncs := make(map[string]map[string]bool)
 	for _, file := range ctx.probe.Files {
-		funcs := make(map[*Function]bool)
+		funcs := make(map[string]bool)
 		fileToFuncs[file.Name] = funcs
 		for _, pc := range file.Cover {
-			fn := ctx.findFunc(ctx.probe.PCs[pc].Func, ctx.probe.PCs[pc].File)
+			fn := ctx.probe.PCs[pc].Func
 			if len(funcToFops[fn]) != 0 {
 				funcs[fn] = true
+				matchedFuncs[fn] = true
 			}
 		}
 	}
 	// This is a special entry for files that has only open callback
 	// (it does not make sense to differentiate them further).
 	generic := &FileOps{
-		Name:    "generic",
-		Open:    "only_open",
-		fileOps: &fileOps{},
+		Name: "generic",
+		Open: "only_open",
 	}
 	ctx.FileOps = append(ctx.FileOps, generic)
 	fopsToFiles := make(map[*FileOps][]string)
 	for _, file := range ctx.probe.Files {
-		// There is a single non US-ASCII file in sysfs: "/sys/bus/pci/drivers/CAFÉ NAND".
-		// Ignore it for now as descriptions shouldn't contain non US-ASCII chars.
-		if ast.IsValidStringLit(file.Name) >= 0 {
-			continue
-		}
 		// For each file figure out the potential file_operations that match this file best.
 		best := ctx.mapFileToFops(fileToFuncs[file.Name], funcToFops, uniqueFuncs, generic)
 		for _, fops := range best {
@@ -199,8 +144,8 @@ func (ctx *context) mapFopsToFiles(uniqueFuncs map[*Function]int) map[*FileOps][
 	return fopsToFiles
 }
 
-func (ctx *context) mapFileToFops(funcs map[*Function]bool, funcToFops map[*Function][]*FileOps,
-	uniqueFuncs map[*Function]int, generic *FileOps) []*FileOps {
+func (ctx *context) mapFileToFops(funcs map[string]bool, funcToFops map[string][]*FileOps,
+	uniqueFuncs map[string]int, generic *FileOps) []*FileOps {
 	// First collect all candidates (all file_operations for which at least 1 callback was triggered).
 	candidates := ctx.fileCandidates(funcs, funcToFops, uniqueFuncs)
 	if len(candidates) == 0 {
@@ -210,7 +155,7 @@ func (ctx *context) mapFileToFops(funcs map[*Function]bool, funcToFops map[*Func
 	// There are lots of false positives due to common callback functions.
 	maxScore := 0
 	for fops := range candidates {
-		ops := fops.ops
+		ops := fops.ops()
 		// All else being equal prefer file_operations with more callbacks defined.
 		score := len(ops)
 		for _, fn := range ops {
@@ -222,7 +167,7 @@ func (ctx *context) mapFileToFops(funcs map[*Function]bool, funcToFops map[*Func
 			// If we matched ioctl, bump score by a lot.
 			// We do want to emit ioctl's b/c they the only non-trivial
 			// operations we emit at the moment.
-			if fn == fops.ioctl {
+			if fn == fops.Ioctl {
 				score += 100
 			}
 			// Unique callbacks are the strongest prioritization signal.
@@ -272,18 +217,18 @@ func (ctx *context) mapFileToFops(funcs map[*Function]bool, funcToFops map[*Func
 	return best
 }
 
-func (ctx *context) fileCandidates(funcs map[*Function]bool, funcToFops map[*Function][]*FileOps,
-	uniqueFuncs map[*Function]int) map[*FileOps]int {
+func (ctx *context) fileCandidates(funcs map[string]bool, funcToFops map[string][]*FileOps,
+	uniqueFuncs map[string]int) map[*FileOps]int {
 	candidates := make(map[*FileOps]int)
 	for fn := range funcs {
 		for _, fops := range funcToFops[fn] {
-			if fops.Open != "" && len(fops.ops) == 1 {
+			if fops.Open != "" && len(fops.ops()) == 1 {
 				// If it has only open, it's not very interesting
 				// (we will use generic for it below).
 				continue
 			}
 			hasUnique := false
-			for _, fn := range fops.ops {
+			for _, fn := range fops.ops() {
 				if uniqueFuncs[fn] == 1 {
 					hasUnique = true
 				}
@@ -295,10 +240,10 @@ func (ctx *context) fileCandidates(funcs map[*Function]bool, funcToFops map[*Fun
 			// for the file, yet we haven't triggered them for reasons described
 			// in the beginning of the function.
 			if !hasUnique {
-				if fops.open != nil && !funcs[fops.open] {
+				if fops.Open != "" && !funcs[fops.Open] {
 					continue
 				}
-				if fops.ioctl != nil && !funcs[fops.ioctl] {
+				if fops.Ioctl != "" && !funcs[fops.Ioctl] {
 					continue
 				}
 			}
@@ -308,23 +253,12 @@ func (ctx *context) fileCandidates(funcs map[*Function]bool, funcToFops map[*Fun
 	return candidates
 }
 
-func (ctx *context) resolveFopsCallbacks() map[*Function]int {
-	uniqueFuncs := make(map[*Function]int)
-	for _, fops := range ctx.FileOps {
-		fops.fileOps = &fileOps{
-			open:  ctx.mustFindFunc(fops.Open, fops.SourceFile),
-			read:  ctx.mustFindFunc(fops.Read, fops.SourceFile),
-			write: ctx.mustFindFunc(fops.Write, fops.SourceFile),
-			mmap:  ctx.mustFindFunc(fops.Mmap, fops.SourceFile),
-			ioctl: ctx.mustFindFunc(fops.Ioctl, fops.SourceFile),
-		}
-		for _, op := range []*Function{fops.open, fops.read, fops.write, fops.mmap, fops.ioctl} {
-			if op == nil {
-				continue
-			}
-			fops.ops = append(fops.ops, op)
-			uniqueFuncs[op]++
+func (fops *FileOps) ops() []string {
+	var ops []string
+	for _, op := range []string{fops.Open, fops.Read, fops.Write, fops.Mmap, fops.Ioctl} {
+		if op != "" {
+			ops = append(ops, op)
 		}
 	}
-	return uniqueFuncs
+	return ops
 }

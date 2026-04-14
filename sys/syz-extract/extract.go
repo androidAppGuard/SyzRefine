@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 
 	"github.com/google/syzkaller/pkg/ast"
 	"github.com/google/syzkaller/pkg/compiler"
@@ -79,11 +80,7 @@ func main() {
 	if extractor == nil {
 		tool.Failf("unknown os: %v", OS)
 	}
-	archList, err := tool.ParseArchList(OS, *flagArch)
-	if err != nil {
-		tool.Failf("failed to parse arch flag: %v", err)
-	}
-	arches, nfiles, err := createArches(OS, archList, flag.Args())
+	arches, nfiles, err := createArches(OS, archList(OS, *flagArch), flag.Args())
 	if err != nil {
 		tool.Fail(err)
 	}
@@ -243,6 +240,18 @@ func createArches(OS string, archArray, files []string) ([]*Arch, int, error) {
 		nfiles += len(arch.files)
 	}
 	return arches, nfiles, nil
+}
+
+func archList(OS, arches string) []string {
+	if arches != "" {
+		return strings.Split(arches, ",")
+	}
+	var archArray []string
+	for arch := range targets.List[OS] {
+		archArray = append(archArray, arch)
+	}
+	sort.Strings(archArray)
+	return archArray
 }
 
 func checkUnsupportedCalls(arches []*Arch) bool {

@@ -3,44 +3,30 @@
 		{
 			"name": "__do_sys_align_syscall",
 			"file": "types.c",
-			"start_line": 111,
-			"end_line": 113,
 			"scopes": [
 				{
-					"arg": -1
+					"arg": -1,
+					"loc": 1
 				}
 			]
 		},
 		{
 			"name": "__do_sys_types_syscall",
 			"file": "types.c",
-			"start_line": 53,
-			"end_line": 57,
 			"scopes": [
 				{
-					"arg": -1
-				}
-			]
-		},
-		{
-			"name": "__do_sys_types_syscall2",
-			"file": "types.c",
-			"start_line": 69,
-			"end_line": 71,
-			"scopes": [
-				{
-					"arg": -1
+					"arg": -1,
+					"loc": 1
 				}
 			]
 		},
 		{
 			"name": "anon_flow",
 			"file": "types.c",
-			"start_line": 73,
-			"end_line": 82,
 			"scopes": [
 				{
 					"arg": -1,
+					"loc": 8,
 					"facts": [
 						{
 							"src": {
@@ -51,7 +37,7 @@
 							},
 							"dst": {
 								"field": {
-									"struct": "11253655576479126317",
+									"struct": "11253655576479126316",
 									"field": "x"
 								}
 							}
@@ -65,7 +51,7 @@
 							},
 							"dst": {
 								"field": {
-									"struct": "11253655576479126319",
+									"struct": "11253655576479126318",
 									"field": "y"
 								}
 							}
@@ -79,7 +65,7 @@
 							},
 							"dst": {
 								"field": {
-									"struct": "11253655576479126320",
+									"struct": "11253655576479126319",
 									"field": "w"
 								}
 							}
@@ -93,8 +79,22 @@
 							},
 							"dst": {
 								"field": {
-									"struct": "11253655576479126310",
+									"struct": "11253655576479126309",
 									"field": "f"
+								}
+							}
+						},
+						{
+							"src": {
+								"argument": {
+									"func": "anon_flow",
+									"arg": 0
+								}
+							},
+							"dst": {
+								"field": {
+									"struct": "11253655576479126322",
+									"field": "a"
 								}
 							}
 						},
@@ -122,48 +122,11 @@
 							"dst": {
 								"field": {
 									"struct": "11253655576479126324",
-									"field": "a"
-								}
-							}
-						},
-						{
-							"src": {
-								"argument": {
-									"func": "anon_flow",
-									"arg": 0
-								}
-							},
-							"dst": {
-								"field": {
-									"struct": "11253655576479126325",
 									"field": "b"
 								}
 							}
 						}
 					]
-				}
-			]
-		},
-		{
-			"name": "atomic_load32",
-			"file": "include/types.h",
-			"start_line": 17,
-			"end_line": 19,
-			"is_static": true,
-			"scopes": [
-				{
-					"arg": -1
-				}
-			]
-		},
-		{
-			"name": "atomic_load64",
-			"file": "include/types.h",
-			"start_line": 21,
-			"end_line": 23,
-			"scopes": [
-				{
-					"arg": -1
 				}
 			]
 		}
@@ -183,26 +146,6 @@
 			"name": "c",
 			"filename": "types.c",
 			"value": 2
-		},
-		{
-			"name": "enum_bar_a",
-			"filename": "types.c",
-			"value": 0
-		},
-		{
-			"name": "enum_bar_b",
-			"filename": "types.c",
-			"value": 1
-		},
-		{
-			"name": "enum_foo_a",
-			"filename": "types.c",
-			"value": 0
-		},
-		{
-			"name": "enum_foo_b",
-			"filename": "types.c",
-			"value": 1
 		}
 	],
 	"enums": [
@@ -212,20 +155,6 @@
 				"a",
 				"b",
 				"c"
-			]
-		},
-		{
-			"name": "enum_bar",
-			"values": [
-				"enum_bar_a",
-				"enum_bar_b"
-			]
-		},
-		{
-			"name": "enum_foo",
-			"values": [
-				"enum_foo_a",
-				"enum_foo_b"
 			]
 		}
 	],
@@ -1010,62 +939,6 @@
 							"elem": {
 								"struct": "various"
 							}
-						}
-					}
-				},
-				{
-					"name": "pi",
-					"counted_by": -1,
-					"type": {
-						"ptr": {
-							"elem": {
-								"int": {
-									"byte_size": 4,
-									"name": "int",
-									"base": "int"
-								}
-							}
-						}
-					}
-				},
-				{
-					"name": "pu",
-					"counted_by": -1,
-					"type": {
-						"ptr": {
-							"elem": {
-								"int": {
-									"byte_size": 4,
-									"name": "u32",
-									"base": "unsigned int"
-								}
-							}
-						}
-					}
-				}
-			],
-			"source_file": "types.c"
-		},
-		{
-			"func": "__do_sys_types_syscall2",
-			"args": [
-				{
-					"name": "foo",
-					"counted_by": -1,
-					"type": {
-						"int": {
-							"byte_size": 4,
-							"enum": "enum_foo"
-						}
-					}
-				},
-				{
-					"name": "bar",
-					"counted_by": -1,
-					"type": {
-						"int": {
-							"byte_size": 4,
-							"enum": "enum_bar"
 						}
 					}
 				}

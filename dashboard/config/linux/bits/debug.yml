@@ -26,7 +26,7 @@ config:
  - DEBUG_DEVRES
  - DEBUG_MEMORY_INIT
  - DEBUG_NOTIFIERS
- - DEBUG_CREDENTIALS: [-v6.8, -chromeos-6.6, -stable-6.6]
+ - DEBUG_CREDENTIALS: [-v6.8, -chromeos-6.6]
  - DEBUG_TIMEKEEPING: [-v6.12]
  - DEBUG_OBJECTS
  - DEBUG_OBJECTS_ENABLE_DEFAULT: 1
@@ -36,7 +36,6 @@ config:
  - DEBUG_OBJECTS_TIMERS
  - DEBUG_OBJECTS_WORK
  - DEBUG_OBJECTS_SELFTEST: n
- - WPROBE_EVENTS: [linux-next, -arm64]
  # Some base configs may not enable sound at all.
  - SND_DEBUG: [-riscv, -s390, optional]
  - SND_PCM_XRUN_DEBUG: [-riscv, -s390, optional]

@@ -18,7 +18,6 @@ import (
 	"github.com/google/syzkaller/pkg/symbolizer"
 	"github.com/google/syzkaller/pkg/vminfo"
 	"github.com/google/syzkaller/sys/targets"
-	"github.com/stretchr/testify/assert"
 )
 
 func TestLinuxIgnores(t *testing.T) {
@@ -288,9 +287,7 @@ func TestLinuxSymbolizeLine(t *testing.T) {
 	}
 
 	cfg := &config{
-		kernelDirs: mgrconfig.KernelDirs{
-			Obj: "/linux",
-		},
+		kernelObj:     "/linux",
 		kernelModules: modules,
 	}
 	ctx := &linux{
@@ -300,12 +297,10 @@ func TestLinuxSymbolizeLine(t *testing.T) {
 	}
 	for i, test := range tests {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
-			rep := &Report{
-				Report: []byte(test.line),
+			result := symbolizeLine(symb, ctx, []byte(test.line))
+			if test.result != string(result) {
+				t.Errorf("want %q\n\t     get %q", test.result, string(result))
 			}
-			err := ctx.symbolize(rep, symb)
-			assert.NoError(t, err)
-			assert.Equal(t, test.result, string(rep.Report))
 		})
 	}
 }

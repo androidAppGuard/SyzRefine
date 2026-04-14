@@ -63,7 +63,6 @@ func main() {
 			Arch:       req.Arch,
 			ConfigName: req.ConfigName,
 			TreeName:   req.TreeName,
-			TreeURL:    req.TreeURL,
 			SeriesID:   req.SeriesID,
 		},
 	}
@@ -78,61 +77,49 @@ func main() {
 		uploadReq.CommitHash = commit.Hash
 		uploadReq.CommitDate = commit.CommitDate
 	}
-	ret := &BuildResult{}
+	if *flagSmokeBuild {
+		skip, err := alreadyBuilt(ctx, client, uploadReq)
+		if err != nil {
+			app.Fatalf("failed to query known builds: %v", err)
+		} else if skip {
+			log.Printf("%s already built, skipping", uploadReq.CommitHash)
+			return
+		}
+	}
+	var finding *api.NewFinding
 	if err != nil {
 		log.Printf("failed to checkout: %v", err)
-		reportResults(ctx, client, nil, nil, []byte(err.Error()))
-		return
+		uploadReq.Log = []byte(err.Error())
 	} else {
-		if *flagSmokeBuild {
-			skip, err := alreadyBuilt(ctx, client, uploadReq)
-			if err != nil {
-				app.Fatalf("failed to query known builds: %v", err)
-			} else if skip {
-				log.Printf("%s already built, skipping", uploadReq.CommitHash)
-				return
-			}
-		}
-		ret, err = buildKernel(tracer, req)
-		if err != nil {
-			log.Printf("build process failed: %v", err)
-			reportResults(ctx, client, nil, nil, []byte(err.Error()))
-			return
+		err := buildKernel(tracer, req)
+		if err == nil {
+			uploadReq.BuildSuccess = true
 		} else {
-			uploadReq.Compiler = ret.Compiler
-			uploadReq.Config = ret.Config
-			if ret.Finding == nil {
-				uploadReq.BuildSuccess = true
-			} else {
-				log.Printf("%s", output.Bytes())
-				log.Printf("failed: %s\n%s", ret.Finding.Title, ret.Finding.Report)
-				uploadReq.Log = ret.Finding.Log
+			log.Printf("%s", output.Bytes())
+			log.Printf("failed to build: %v", err)
+			uploadReq.Log = []byte(err.Error())
+			finding = &api.NewFinding{
+				SessionID: *flagSession,
+				TestName:  *flagTestName,
+				Title:     "failed to build the kernel",
+				Log:       uploadReq.Log,
 			}
 		}
 	}
-	reportResults(ctx, client, uploadReq, ret.Finding, output.Bytes())
+	reportResults(ctx, client, req.SeriesID != "",
+		uploadReq, finding, output.Bytes())
 }
 
-func reportResults(ctx context.Context, client *api.Client,
+func reportResults(ctx context.Context, client *api.Client, patched bool,
 	uploadReq *api.UploadBuildReq, finding *api.NewFinding, output []byte) {
-	var buildID string
-	status := api.TestPassed
-	if uploadReq != nil {
-		if !uploadReq.BuildSuccess {
-			status = api.TestFailed
-		}
-		buildInfo, err := client.UploadBuild(ctx, uploadReq)
-		if err != nil {
-			app.Fatalf("failed to upload build: %v", err)
-		}
-		log.Printf("uploaded build, reply: %q", buildInfo)
-		buildID = buildInfo.ID
-	} else {
-		status = api.TestError
+	buildInfo, err := client.UploadBuild(ctx, uploadReq)
+	if err != nil {
+		app.Fatalf("failed to upload build: %v", err)
 	}
+	log.Printf("uploaded build, reply: %q", buildInfo)
 	osutil.WriteJSON(filepath.Join(*flagOutput, "result.json"), &api.BuildResult{
-		BuildID: buildID,
-		Success: status == api.TestPassed,
+		BuildID: buildInfo.ID,
+		Success: uploadReq.BuildSuccess,
 	})
 	if *flagSmokeBuild {
 		return
@@ -140,17 +127,18 @@ func reportResults(ctx context.Context, client *api.Client,
 	testResult := &api.TestResult{
 		SessionID: *flagSession,
 		TestName:  *flagTestName,
-		Result:    status,
+		Result:    api.TestFailed,
 		Log:       output,
 	}
-	if uploadReq != nil {
-		if uploadReq.SeriesID != "" {
-			testResult.PatchedBuildID = buildID
-		} else {
-			testResult.BaseBuildID = buildID
-		}
+	if uploadReq.BuildSuccess {
+		testResult.Result = api.TestPassed
 	}
-	err := client.UploadTestResult(ctx, testResult)
+	if patched {
+		testResult.PatchedBuildID = buildInfo.ID
+	} else {
+		testResult.BaseBuildID = buildInfo.ID
+	}
+	err = client.UploadTestResult(ctx, testResult)
 	if err != nil {
 		app.Fatalf("failed to report the test result: %v", err)
 	}
@@ -197,7 +185,7 @@ func checkoutKernel(tracer debugtracer.DebugTracer, req *api.BuildRequest, serie
 	if err != nil {
 		return nil, err
 	}
-	commit, err := ops.Commit(req.TreeName, req.CommitHash)
+	commit, err := ops.Commit(req.CommitHash)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get commit info: %w", err)
 	}
@@ -208,24 +196,18 @@ func checkoutKernel(tracer debugtracer.DebugTracer, req *api.BuildRequest, serie
 	if len(patches) > 0 {
 		tracer.Log("applying %d patches", len(patches))
 	}
-	err = ops.ApplySeries(commit.Hash, patches)
+	err = ops.ApplySeries(req.CommitHash, patches)
 	return commit, err
 }
 
-type BuildResult struct {
-	Config   []byte
-	Compiler string
-	Finding  *api.NewFinding
-}
-
-func buildKernel(tracer debugtracer.DebugTracer, req *api.BuildRequest) (*BuildResult, error) {
+func buildKernel(tracer debugtracer.DebugTracer, req *api.BuildRequest) error {
 	kernelConfig, err := os.ReadFile(filepath.Join("/kernel-configs", req.ConfigName))
 	if err != nil {
-		return nil, fmt.Errorf("failed to read the kernel config: %w", err)
+		return fmt.Errorf("failed to read the kernel config: %w", err)
 	}
 	if req.Arch != "amd64" {
 		// TODO: lift this restriction.
-		return nil, fmt.Errorf("only amd64 builds are supported now")
+		return fmt.Errorf("only amd64 builds are supported now")
 	}
 	params := build.Params{
 		TargetOS:     targets.Linux,
@@ -242,68 +224,27 @@ func buildKernel(tracer debugtracer.DebugTracer, req *api.BuildRequest) (*BuildR
 	tracer.Log("started build: %q", req)
 	info, err := build.Image(params)
 	tracer.Log("compiler: %q", info.CompilerID)
-	tracer.Log("signature: %q", info.Signature)
-	// We can fill this regardless of whether it succeeded.
-	ret := &BuildResult{
-		Compiler: info.CompilerID,
-	}
-	ret.Config, _ = os.ReadFile(filepath.Join(*flagOutput, "kernel.config"))
 	if err != nil {
-		ret.Finding = &api.NewFinding{
-			SessionID: *flagSession,
-			TestName:  *flagTestName,
-			Title:     "kernel build error",
-		}
 		var kernelError *build.KernelError
 		var verboseError *osutil.VerboseError
 		switch {
 		case errors.As(err, &kernelError):
 			tracer.Log("kernel error: %q / %s", kernelError.Report, kernelError.Output)
-			ret.Finding.Report = kernelError.Report
-			ret.Finding.Log = kernelError.Output
-			return ret, nil
 		case errors.As(err, &verboseError):
-			tracer.Log("verbose error: %s / %s", verboseError, verboseError.Output)
-			ret.Finding.Report = []byte(verboseError.Error())
-			ret.Finding.Log = verboseError.Output
-			return ret, nil
+			tracer.Log("verbose error: %q / %s", verboseError.Title, verboseError.Output)
 		default:
 			tracer.Log("other error: %v", err)
 		}
-		return nil, err
+		return err
 	}
 	tracer.Log("build finished successfully")
-
-	err = saveSymbolHashes(tracer)
-	if err != nil {
-		tracer.Log("failed to save symbol hashes: %s", err)
-	}
+	// TODO: capture build logs and the compiler identity.
 	// Note: Output directory has the following structure:
 	//   |-- image
-	//   |-- symbol_hashes.json
 	//   |-- kernel
 	//   |-- kernel.config
 	//   `-- obj
 	//      `-- vmlinux
-	return ret, nil
-}
-
-func saveSymbolHashes(tracer debugtracer.DebugTracer) error {
-	hashes, err := build.ElfSymbolHashes(filepath.Join(*flagRepository, "vmlinux.o"))
-	if err != nil {
-		return fmt.Errorf("failed to query symbol hashes: %w", err)
-	}
-	tracer.Log("extracted hashes for %d text symbols and %d data symbols",
-		len(hashes.Text), len(hashes.Data))
-	file, err := os.Create(filepath.Join(*flagOutput, "symbol_hashes.json"))
-	if err != nil {
-		return fmt.Errorf("failed to open symbol_hashes.json: %w", err)
-	}
-	defer file.Close()
-	err = json.NewEncoder(file).Encode(hashes)
-	if err != nil {
-		return fmt.Errorf("failed to serialize: %w", err)
-	}
 	return nil
 }
 

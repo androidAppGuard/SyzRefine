@@ -16,22 +16,20 @@ import (
 )
 
 type APIServer struct {
-	seriesService      *service.SeriesService
-	sessionService     *service.SessionService
-	buildService       *service.BuildService
-	testService        *service.SessionTestService
-	findingService     *service.FindingService
-	baseFindingService *service.BaseFindingService
+	seriesService  *service.SeriesService
+	sessionService *service.SessionService
+	buildService   *service.BuildService
+	testService    *service.SessionTestService
+	findingService *service.FindingService
 }
 
 func NewAPIServer(env *app.AppEnvironment) *APIServer {
 	return &APIServer{
-		seriesService:      service.NewSeriesService(env),
-		sessionService:     service.NewSessionService(env),
-		buildService:       service.NewBuildService(env),
-		testService:        service.NewSessionTestService(env),
-		findingService:     service.NewFindingService(env),
-		baseFindingService: service.NewBaseFindingService(env),
+		seriesService:  service.NewSeriesService(env),
+		sessionService: service.NewSessionService(env),
+		buildService:   service.NewBuildService(env),
+		testService:    service.NewSessionTestService(env),
+		findingService: service.NewFindingService(env),
 	}
 }
 
@@ -44,12 +42,9 @@ func (c APIServer) Mux() *http.ServeMux {
 	mux.HandleFunc("/series/{series_id}", c.getSeries)
 	mux.HandleFunc("/sessions/upload", c.uploadSession)
 	mux.HandleFunc("/sessions/{session_id}/series", c.getSessionSeries)
-	mux.HandleFunc("/sessions/{session_id}/triage_result", c.triageResult)
-	mux.HandleFunc("/tests/upload_artifacts", c.uploadTestArtifact)
+	mux.HandleFunc("/sessions/{session_id}/skip", c.skipSession)
 	mux.HandleFunc("/tests/upload", c.uploadTest)
 	mux.HandleFunc("/trees", c.getTrees)
-	mux.HandleFunc("/base_findings/upload", c.uploadBaseFinding)
-	mux.HandleFunc("/base_findings/status", c.baseFindingStatus)
 	return mux
 }
 
@@ -65,12 +60,12 @@ func (c APIServer) getSessionSeries(w http.ResponseWriter, r *http.Request) {
 	api.ReplyJSON(w, resp)
 }
 
-func (c APIServer) triageResult(w http.ResponseWriter, r *http.Request) {
-	req := api.ParseJSON[api.UploadTriageResultReq](w, r)
+func (c APIServer) skipSession(w http.ResponseWriter, r *http.Request) {
+	req := api.ParseJSON[api.SkipRequest](w, r)
 	if req == nil {
 		return
 	}
-	err := c.sessionService.TriageResult(r.Context(), r.PathValue("session_id"), req)
+	err := c.sessionService.SkipSession(r.Context(), r.PathValue("session_id"), req)
 	if errors.Is(err, service.ErrSessionNotFound) {
 		http.Error(w, fmt.Sprint(err), http.StatusNotFound)
 		return
@@ -114,36 +109,6 @@ func (c APIServer) uploadTest(w http.ResponseWriter, r *http.Request) {
 	}
 	// TODO: add parameters validation (and also of the Log size).
 	err := c.testService.Save(r.Context(), req)
-	if err != nil {
-		http.Error(w, fmt.Sprint(err), http.StatusInternalServerError)
-		return
-	}
-	api.ReplyJSON[interface{}](w, nil)
-}
-
-func (c APIServer) uploadTestArtifact(w http.ResponseWriter, r *http.Request) {
-	const maxMemory = 16 * 1000 * 1000 // 16 MB.
-	if err := r.ParseMultipartForm(maxMemory); err != nil {
-		http.Error(w, "could not parse the multipart form", http.StatusBadRequest)
-		return
-	}
-	defer r.MultipartForm.RemoveAll()
-
-	file, _, err := r.FormFile("content")
-	if err != nil {
-		if err == http.ErrMissingFile {
-			http.Error(w, "the 'content' file must be present", http.StatusBadRequest)
-			return
-		}
-		http.Error(w, fmt.Sprintf("failed to query the file: %s", err), http.StatusInternalServerError)
-		return
-	}
-	defer file.Close()
-
-	err = c.testService.SaveArtifacts(r.Context(),
-		r.FormValue("session"),
-		r.FormValue("test"),
-		file)
 	if err != nil {
 		http.Error(w, fmt.Sprint(err), http.StatusInternalServerError)
 		return
@@ -206,36 +171,6 @@ func (c APIServer) uploadSession(w http.ResponseWriter, r *http.Request) {
 
 func (c APIServer) getTrees(w http.ResponseWriter, r *http.Request) {
 	api.ReplyJSON(w, &api.TreesResp{
-		Trees:       api.DefaultTrees,
-		FuzzTargets: api.FuzzTargets,
+		Trees: api.DefaultTrees,
 	})
-}
-
-func (c APIServer) uploadBaseFinding(w http.ResponseWriter, r *http.Request) {
-	req := api.ParseJSON[api.BaseFindingInfo](w, r)
-	if req == nil {
-		return
-	}
-	err := c.baseFindingService.Upload(r.Context(), req)
-	if errors.Is(err, service.ErrBuildNotFound) {
-		http.Error(w, fmt.Sprint(err), http.StatusNotFound)
-		return
-	} else if err != nil {
-		http.Error(w, fmt.Sprint(err), http.StatusInternalServerError)
-		return
-	}
-	api.ReplyJSON[interface{}](w, nil)
-}
-
-func (c APIServer) baseFindingStatus(w http.ResponseWriter, r *http.Request) {
-	req := api.ParseJSON[api.BaseFindingInfo](w, r)
-	if req == nil {
-		return
-	}
-	resp, err := c.baseFindingService.Status(r.Context(), req)
-	if err != nil {
-		http.Error(w, fmt.Sprint(err), http.StatusInternalServerError)
-		return
-	}
-	api.ReplyJSON[*api.BaseFindingStatus](w, resp)
 }

@@ -63,7 +63,6 @@ func NewCtx(t *testing.T) *Ctx {
 	}
 	t.Parallel()
 	inst, err := aetest.NewInstance(&aetest.Options{
-		StartupTimeout: 120 * time.Second,
 		// Without this option datastore queries return data with slight delay,
 		// which fails reporting tests.
 		StronglyConsistentDatastore: true,
@@ -217,7 +216,12 @@ func (c *Ctx) setSubsystems(ns string, list []*subsystem.Subsystem, rev int) {
 	c.transformContext = func(c context.Context) context.Context {
 		newConfig := replaceNamespaceConfig(c, ns, func(cfg *Config) *Config {
 			ret := *cfg
-			ret.Subsystems.Service = subsystem.MustMakeService(list, rev)
+			ret.Subsystems.Revision = rev
+			if list == nil {
+				ret.Subsystems.Service = nil
+			} else {
+				ret.Subsystems.Service = subsystem.MustMakeService(list)
+			}
 			return &ret
 		})
 		return contextWithConfig(c, newConfig)
@@ -232,7 +236,7 @@ func (c *Ctx) setCoverageMocks(ns string, dbClientMock spannerclient.SpannerClie
 			ret.Coverage = &CoverageConfig{WebGitURI: "test-git"}
 			return &ret
 		})
-		ctxWithSpanner := setCoverageDBClient(ctx, dbClientMock)
+		ctxWithSpanner := SetCoverageDBClient(ctx, dbClientMock)
 		ctxWithSpannerAndFileProvider := setWebGit(ctxWithSpanner, fileProvMock)
 		return contextWithConfig(ctxWithSpannerAndFileProvider, newConfig)
 	}
@@ -353,10 +357,9 @@ func (c *Ctx) httpRequest(method, url, body, contentType string,
 	}
 	r = registerRequest(r, c)
 	r = r.WithContext(c.transformContext(r.Context()))
-	switch access {
-	case AccessAdmin:
+	if access == AccessAdmin {
 		aetest.Login(makeUser(AuthorizedAdmin), r)
-	case AccessUser:
+	} else if access == AccessUser {
 		aetest.Login(makeUser(AuthorizedUser), r)
 	}
 	w := httptest.NewRecorder()
@@ -666,7 +669,7 @@ Content-Type: text/plain
 %v
 `, sender, id, subject, from, strings.Join(cc, ","), to, origFrom, body)
 	log.Infof(c.ctx, "sending %s", email)
-	_, err := c.POST("/_ah/mail/"+to, email)
+	_, err := c.POST("/_ah/mail/email@server.com", email)
 	c.expectOK(err)
 }
 

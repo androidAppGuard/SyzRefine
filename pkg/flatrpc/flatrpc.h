@@ -141,36 +141,34 @@ enum class Feature : uint64_t {
   Comparisons = 2ULL,
   ExtraCoverage = 4ULL,
   DelayKcovMmap = 8ULL,
-  KcovResetIoctl = 16ULL,
-  SandboxNone = 32ULL,
-  SandboxSetuid = 64ULL,
-  SandboxNamespace = 128ULL,
-  SandboxAndroid = 256ULL,
-  Fault = 512ULL,
-  Leak = 1024ULL,
-  NetInjection = 2048ULL,
-  NetDevices = 4096ULL,
-  KCSAN = 8192ULL,
-  DevlinkPCI = 16384ULL,
-  NicVF = 32768ULL,
-  USBEmulation = 65536ULL,
-  VhciInjection = 131072ULL,
-  WifiEmulation = 262144ULL,
-  LRWPANEmulation = 524288ULL,
-  BinFmtMisc = 1048576ULL,
-  Swap = 2097152ULL,
+  SandboxNone = 16ULL,
+  SandboxSetuid = 32ULL,
+  SandboxNamespace = 64ULL,
+  SandboxAndroid = 128ULL,
+  Fault = 256ULL,
+  Leak = 512ULL,
+  NetInjection = 1024ULL,
+  NetDevices = 2048ULL,
+  KCSAN = 4096ULL,
+  DevlinkPCI = 8192ULL,
+  NicVF = 16384ULL,
+  USBEmulation = 32768ULL,
+  VhciInjection = 65536ULL,
+  WifiEmulation = 131072ULL,
+  LRWPANEmulation = 262144ULL,
+  BinFmtMisc = 524288ULL,
+  Swap = 1048576ULL,
   NONE = 0,
-  ANY = 4194303ULL
+  ANY = 2097151ULL
 };
 FLATBUFFERS_DEFINE_BITMASK_OPERATORS(Feature, uint64_t)
 
-inline const Feature (&EnumValuesFeature())[22] {
+inline const Feature (&EnumValuesFeature())[21] {
   static const Feature values[] = {
     Feature::Coverage,
     Feature::Comparisons,
     Feature::ExtraCoverage,
     Feature::DelayKcovMmap,
-    Feature::KcovResetIoctl,
     Feature::SandboxNone,
     Feature::SandboxSetuid,
     Feature::SandboxNamespace,
@@ -198,7 +196,6 @@ inline const char *EnumNameFeature(Feature e) {
     case Feature::Comparisons: return "Comparisons";
     case Feature::ExtraCoverage: return "ExtraCoverage";
     case Feature::DelayKcovMmap: return "DelayKcovMmap";
-    case Feature::KcovResetIoctl: return "KcovResetIoctl";
     case Feature::SandboxNone: return "SandboxNone";
     case Feature::SandboxSetuid: return "SandboxSetuid";
     case Feature::SandboxNamespace: return "SandboxNamespace";
@@ -560,33 +557,31 @@ inline const char *EnumNameRequestFlag(RequestFlag e) {
 enum class ExecEnv : uint64_t {
   Debug = 1ULL,
   Signal = 2ULL,
-  ReadOnlyCoverage = 4ULL,
-  ResetState = 8ULL,
-  SandboxNone = 16ULL,
-  SandboxSetuid = 32ULL,
-  SandboxNamespace = 64ULL,
-  SandboxAndroid = 128ULL,
-  ExtraCover = 256ULL,
-  EnableTun = 512ULL,
-  EnableNetDev = 1024ULL,
-  EnableNetReset = 2048ULL,
-  EnableCgroups = 4096ULL,
-  EnableCloseFds = 8192ULL,
-  EnableDevlinkPCI = 16384ULL,
-  EnableVhciInjection = 32768ULL,
-  EnableWifi = 65536ULL,
-  DelayKcovMmap = 131072ULL,
-  EnableNicVF = 262144ULL,
+  ResetState = 4ULL,
+  SandboxNone = 8ULL,
+  SandboxSetuid = 16ULL,
+  SandboxNamespace = 32ULL,
+  SandboxAndroid = 64ULL,
+  ExtraCover = 128ULL,
+  EnableTun = 256ULL,
+  EnableNetDev = 512ULL,
+  EnableNetReset = 1024ULL,
+  EnableCgroups = 2048ULL,
+  EnableCloseFds = 4096ULL,
+  EnableDevlinkPCI = 8192ULL,
+  EnableVhciInjection = 16384ULL,
+  EnableWifi = 32768ULL,
+  DelayKcovMmap = 65536ULL,
+  EnableNicVF = 131072ULL,
   NONE = 0,
-  ANY = 524287ULL
+  ANY = 262143ULL
 };
 FLATBUFFERS_DEFINE_BITMASK_OPERATORS(ExecEnv, uint64_t)
 
-inline const ExecEnv (&EnumValuesExecEnv())[19] {
+inline const ExecEnv (&EnumValuesExecEnv())[18] {
   static const ExecEnv values[] = {
     ExecEnv::Debug,
     ExecEnv::Signal,
-    ExecEnv::ReadOnlyCoverage,
     ExecEnv::ResetState,
     ExecEnv::SandboxNone,
     ExecEnv::SandboxSetuid,
@@ -611,7 +606,6 @@ inline const char *EnumNameExecEnv(ExecEnv e) {
   switch (e) {
     case ExecEnv::Debug: return "Debug";
     case ExecEnv::Signal: return "Signal";
-    case ExecEnv::ReadOnlyCoverage: return "ReadOnlyCoverage";
     case ExecEnv::ResetState: return "ResetState";
     case ExecEnv::SandboxNone: return "SandboxNone";
     case ExecEnv::SandboxSetuid: return "SandboxSetuid";

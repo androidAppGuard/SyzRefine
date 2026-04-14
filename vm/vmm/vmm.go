@@ -5,7 +5,6 @@
 package vmm
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -45,11 +44,14 @@ type Pool struct {
 }
 
 type instance struct {
-	cfg   *Config
-	image string
-	debug bool
-	os    string
-	vmimpl.SSHOptions
+	cfg      *Config
+	image    string
+	debug    bool
+	os       string
+	sshkey   string
+	sshuser  string
+	sshhost  string
+	sshport  int
 	merger   *vmimpl.OutputMerger
 	vmName   string
 	vmm      *exec.Cmd
@@ -93,23 +95,21 @@ func (pool *Pool) Count() int {
 	return pool.cfg.Count
 }
 
-func (pool *Pool) Create(_ context.Context, workdir string, index int) (vmimpl.Instance, error) {
+func (pool *Pool) Create(workdir string, index int) (vmimpl.Instance, error) {
 	var tee io.Writer
 	if pool.env.Debug {
 		tee = os.Stdout
 	}
 	inst := &instance{
-		cfg:   pool.cfg,
-		image: filepath.Join(workdir, "disk.qcow2"),
-		debug: pool.env.Debug,
-		os:    pool.env.OS,
-		SSHOptions: vmimpl.SSHOptions{
-			Key:  pool.env.SSHKey,
-			User: pool.env.SSHUser,
-			Port: 22,
-		},
-		vmName: fmt.Sprintf("%v-%v", pool.env.Name, index),
-		merger: vmimpl.NewOutputMerger(tee),
+		cfg:     pool.cfg,
+		image:   filepath.Join(workdir, "disk.qcow2"),
+		debug:   pool.env.Debug,
+		os:      pool.env.OS,
+		sshkey:  pool.env.SSHKey,
+		sshuser: pool.env.SSHUser,
+		sshport: 22,
+		vmName:  fmt.Sprintf("%v-%v", pool.env.Name, index),
+		merger:  vmimpl.NewOutputMerger(tee),
 	}
 
 	// Stop the instance from the previous run in case it's still running.
@@ -180,13 +180,13 @@ func (inst *instance) Boot() error {
 	inr.Close()
 	inst.merger.Add("console", outr)
 
-	inst.Addr, err = inst.lookupSSHAddress()
+	inst.sshhost, err = inst.lookupSSHAddress()
 	if err != nil {
 		return err
 	}
 
-	if err := vmimpl.WaitForSSH(20*time.Minute, inst.SSHOptions,
-		inst.os, nil, false, inst.debug); err != nil {
+	if err := vmimpl.WaitForSSH(inst.debug, 20*time.Minute, inst.sshhost,
+		inst.sshkey, inst.sshuser, inst.os, inst.sshport, nil, false); err != nil {
 		out := <-inst.merger.Output
 		return vmimpl.BootError{Title: err.Error(), Output: out}
 	}
@@ -229,9 +229,9 @@ func (inst *instance) Close() error {
 }
 
 func (inst *instance) Forward(port int) (string, error) {
-	octets := strings.Split(inst.Addr, ".")
+	octets := strings.Split(inst.sshhost, ".")
 	if len(octets) < 3 {
-		return "", fmt.Errorf("too few octets in hostname %v", inst.Addr)
+		return "", fmt.Errorf("too few octets in hostname %v", inst.sshhost)
 	}
 	addr := fmt.Sprintf("%v.%v.%v.2:%v", octets[0], octets[1], octets[2], port)
 	return addr, nil
@@ -239,8 +239,8 @@ func (inst *instance) Forward(port int) (string, error) {
 
 func (inst *instance) Copy(hostSrc string) (string, error) {
 	vmDst := filepath.Join("/root", filepath.Base(hostSrc))
-	args := append(vmimpl.SCPArgs(inst.debug, inst.Key, inst.Port, false),
-		hostSrc, inst.User+"@"+inst.Addr+":"+vmDst)
+	args := append(vmimpl.SCPArgs(inst.debug, inst.sshkey, inst.sshport, false),
+		hostSrc, inst.sshuser+"@"+inst.sshhost+":"+vmDst)
 	if inst.debug {
 		log.Logf(0, "running command: scp %#v", args)
 	}
@@ -251,7 +251,7 @@ func (inst *instance) Copy(hostSrc string) (string, error) {
 	return vmDst, nil
 }
 
-func (inst *instance) Run(ctx context.Context, command string) (
+func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command string) (
 	<-chan []byte, <-chan error, error) {
 	rpipe, wpipe, err := osutil.LongPipe()
 	if err != nil {
@@ -259,8 +259,8 @@ func (inst *instance) Run(ctx context.Context, command string) (
 	}
 	inst.merger.Add("ssh", rpipe)
 
-	args := append(vmimpl.SSHArgs(inst.debug, inst.Key, inst.Port, false),
-		inst.User+"@"+inst.Addr, command)
+	args := append(vmimpl.SSHArgs(inst.debug, inst.sshkey, inst.sshport, false),
+		inst.sshuser+"@"+inst.sshhost, command)
 	if inst.debug {
 		log.Logf(0, "running command: ssh %#v", args)
 	}
@@ -282,7 +282,9 @@ func (inst *instance) Run(ctx context.Context, command string) (
 
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-time.After(timeout):
+			signal(vmimpl.ErrTimeout)
+		case <-stop:
 			signal(vmimpl.ErrTimeout)
 		case err := <-inst.merger.Err:
 			cmd.Process.Kill()

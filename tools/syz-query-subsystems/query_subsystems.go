@@ -58,10 +58,7 @@ func main() {
 	if err = osutil.MkdirAll(folder); err != nil {
 		tool.Failf("failed to create %s: %v", folder, err)
 	}
-	commitInfo, err := determineCommitInfo(*flagKernelRepo)
-	if err != nil {
-		tool.Failf("failed to fetch commit info: %v", err)
-	}
+	commitInfo := determineCommitInfo(*flagKernelRepo)
 	code, err := generateSubsystemsFile(*flagName, list, commitInfo)
 	if err != nil {
 		tool.Failf("failed to generate code: %s", err)
@@ -98,14 +95,15 @@ func prepareFilter() func(*subsystem.Subsystem) bool {
 	}
 }
 
-func determineCommitInfo(dir string) (*vcs.Commit, error) {
+func determineCommitInfo(dir string) string {
+	// Best effort only.
 	repo, err := vcs.NewRepo(*flagOS, "", dir, vcs.OptPrecious, vcs.OptDontSandbox)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open repo: %w", err)
+		return fmt.Sprintf("failed to open repo: %v", err)
 	}
 	commit, err := repo.Commit(vcs.HEAD)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get HEAD commit: %w", err)
+		return fmt.Sprintf("failed to get HEAD commit: %v", err)
 	}
-	return commit, err
+	return fmt.Sprintf(`Commit %s, "%.32s"`, commit.Hash, commit.Title)
 }

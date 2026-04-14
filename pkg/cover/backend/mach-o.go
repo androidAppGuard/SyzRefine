@@ -10,16 +10,17 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/vminfo"
 	"github.com/google/syzkaller/sys/targets"
 )
 
-func makeMachO(target *targets.Target, kernelDirs *mgrconfig.KernelDirs,
+func makeMachO(target *targets.Target, objDir, srcDir, buildDir string,
 	moduleObj []string, hostModules []*vminfo.KernelModule) (*Impl, error) {
 	return makeDWARF(&dwarfParams{
 		target:                target,
-		kernelDirs:            kernelDirs,
+		objDir:                objDir,
+		srcDir:                srcDir,
+		buildDir:              buildDir,
 		moduleObj:             moduleObj,
 		hostModules:           hostModules,
 		readSymbols:           machoReadSymbols,

@@ -940,11 +940,10 @@ func handleRetestedRepro(c context.Context, now time.Time, job *Job, jobKey *db.
 	crash.LastReproRetest = now
 	if req.Error == nil && !crash.ReproIsRevoked {
 		// If repro testing itself failed, it might be just a temporary issue.
-		switch job.Type {
-		case JobTestPatch:
+		if job.Type == JobTestPatch {
 			// If there was any crash at all, the repro is still not worth discarding.
 			crash.ReproIsRevoked = len(allTitles) == 0
-		case JobBisectFix:
+		} else if job.Type == JobBisectFix {
 			// More than one commit is suspected => repro stopped working at some point.
 			crash.ReproIsRevoked = len(req.Commits) > 0
 		}

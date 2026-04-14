@@ -16,6 +16,9 @@ cron:
   schedule: every 5 minutes
 - url: /cron/subsystem_reports
   schedule: every 8 hours
+- url: /_ah/datastore_admin/backup.create?name=backup&filesystem=gs&gs_bucket_name=syzkaller-backups&kind=Bug&kind=Build&kind=Crash&kind=CrashLog&kind=CrashReport&kind=Error&kind=Job&kind=KernelConfig&kind=Manager&kind=ManagerStats&kind=Patch&kind=ReportingState&kind=ReproC&kind=ReproSyz
+  schedule: every monday 00:00
+  target: ah-builtin-python-bundle
 # Update quarter coverage numbers every week.
 - url: /cron/batch_coverage?quarters=true&steps=2
   schedule: every sunday 00:00
@@ -30,12 +33,3 @@ cron:
 # Export reproducers every week.
 - url: /cron/batch_db_export
   schedule: every saturday 00:00
-# Monthly coverage reports are regenerated every week.
-# Coverage data propagation may take up to ~48 hours.
-# 7 days + 2 days = 9 days is the maximum expected delay to guarantee monthly coverage data will not change.
-# We use 15 for convenience here.
-- url: /cron/email_coverage_reports
-  schedule: 15 of month 00:00
-# Weekly update the kernel-file -> subsystems relationship
-- url: /cron/update_coverdb_subsystems
-  schedule: every monday

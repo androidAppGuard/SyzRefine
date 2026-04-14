@@ -12,7 +12,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/google/syzkaller/pkg/cover"
 	"github.com/google/syzkaller/pkg/ifaceprobe"
 )
 
@@ -28,12 +27,11 @@ type StructInfo struct {
 	Align int
 }
 
-func Run(out *Output, probe *ifaceprobe.Info, coverage []*cover.FileCoverage,
-	syscallRename map[string][]string, trace io.Writer) (*Result, error) {
+func Run(out *Output, probe *ifaceprobe.Info, syscallRename map[string][]string, trace io.Writer) (
+	*Result, error) {
 	ctx := &context{
 		Output:        out,
 		probe:         probe,
-		coverage:      coverage,
 		syscallRename: syscallRename,
 		structs:       make(map[string]*Struct),
 		funcs:         make(map[string]*Function),
@@ -66,7 +64,6 @@ func Run(out *Output, probe *ifaceprobe.Info, coverage []*cover.FileCoverage,
 type context struct {
 	*Output
 	probe         *ifaceprobe.Info
-	coverage      []*cover.FileCoverage
 	syscallRename map[string][]string // syscall function -> syscall names
 	structs       map[string]*Struct
 	funcs         map[string]*Function
@@ -164,58 +161,41 @@ func (ctx *context) processSyscalls() {
 	var syscalls []*Syscall
 	for _, call := range ctx.Syscalls {
 		ctx.processFields(call.Args, "", false)
-		for varArg := range call.Args {
-			cmds := ctx.inferCommandVariants(call.Func, call.SourceFile, varArg)
+		call.returnType = ctx.inferReturnType(call.Func, call.SourceFile)
+		for i, arg := range call.Args {
+			typ := ctx.inferArgType(call.Func, call.SourceFile, i)
+			refineFieldType(arg, typ, false)
+		}
+		ctx.emitSyscall(&syscalls, call, "")
+		for i := range call.Args {
+			cmds := ctx.inferCommandVariants(call.Func, call.SourceFile, i)
 			for _, cmd := range cmds {
 				variant := *call
 				variant.Args = slices.Clone(call.Args)
-				for i, oldArg := range variant.Args {
-					arg := *oldArg
-					if i == varArg {
-						arg.syzType = fmt.Sprintf("const[%v]", cmd)
-					} else {
-						typ := ctx.inferArgType(call.Func, call.SourceFile, i, varArg, cmd)
-						refineFieldType(&arg, typ, false)
-					}
-					variant.Args[i] = &arg
-				}
-				variant.returnType = ctx.inferReturnType(call.Func, call.SourceFile, varArg, cmd)
+				newArg := *variant.Args[i]
+				newArg.syzType = fmt.Sprintf("const[%v]", cmd)
+				variant.Args[i] = &newArg
 				suffix := cmd
 				if call.Func == "__do_sys_ioctl" {
 					suffix = ctx.uniqualize("ioctl cmd", cmd)
 				}
-				ctx.emitSyscall(&syscalls, &variant, "_"+suffix, cmd, varArg, cmd)
+				ctx.emitSyscall(&syscalls, &variant, "_"+suffix)
 			}
 		}
-		call.returnType = ctx.inferReturnType(call.Func, call.SourceFile, -1, "")
-		for i, arg := range call.Args {
-			typ := ctx.inferArgType(call.Func, call.SourceFile, i, -1, "")
-			refineFieldType(arg, typ, false)
-		}
-		ctx.emitSyscall(&syscalls, call, "", "", -1, "")
 	}
 	ctx.Syscalls = sortAndDedupSlice(syscalls)
 }
 
-func (ctx *context) emitSyscall(syscalls *[]*Syscall, call *Syscall,
-	suffix, cmd string, scopeArg int, scopeVal string) {
+func (ctx *context) emitSyscall(syscalls *[]*Syscall, call *Syscall, suffix string) {
 	fn := strings.TrimPrefix(call.Func, "__do_sys_")
 	for _, name := range ctx.syscallRename[fn] {
-		syscallName := name
-		identifyingConst := "__NR_" + name
-		if cmd != "" {
-			syscallName += "$" + cmd
-			identifyingConst = cmd
-		}
 		ctx.noteInterface(&Interface{
 			Type:             IfaceSyscall,
-			Name:             syscallName,
-			IdentifyingConst: identifyingConst,
+			Name:             name,
+			IdentifyingConst: "__NR_" + name,
 			Files:            []string{call.SourceFile},
 			Func:             call.Func,
-			AutoDescriptions: TristateYes,
-			scopeArg:         scopeArg,
-			scopeVal:         scopeVal,
+			AutoDescriptions: true,
 		})
 		newCall := *call
 		newCall.Func = name + autoSuffix + suffix
@@ -232,7 +212,6 @@ func (ctx *context) processIouring() {
 			Files:            []string{op.SourceFile},
 			Func:             op.Func,
 			Access:           AccessUser,
-			AutoDescriptions: TristateNo,
 		})
 	}
 }
@@ -419,8 +398,8 @@ func (ctx *context) specialInt4(field, typ string, needBase bool) string {
 }
 
 func (ctx *context) specialIntptr(field, typ string, needBase bool) string {
-	switch field {
-	case "sigsetsize":
+	switch {
+	case field == "sigsetsize":
 		return fmt.Sprintf("const[8 %v]", maybeBaseType("intptr", needBase))
 	}
 	return ""

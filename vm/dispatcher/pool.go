@@ -19,7 +19,7 @@ type Instance interface {
 
 type UpdateInfo func(cb func(info *Info))
 type Runner[T Instance] func(ctx context.Context, inst T, updInfo UpdateInfo)
-type CreateInstance[T Instance] func(context.Context, int) (T, error)
+type CreateInstance[T Instance] func(int) (T, error)
 
 // Pool[T] provides the functionality of a generic pool of instances.
 // The instance is assumed to boot, be controlled by one Runner and then be re-created.
@@ -40,8 +40,6 @@ type Pool[T Instance] struct {
 	paused    bool
 }
 
-const bootErrorChanCap = 16
-
 func NewPool[T Instance](count int, creator CreateInstance[T], def Runner[T]) *Pool[T] {
 	instances := make([]*poolInstance[T], count)
 	for i := 0; i < count; i++ {
@@ -54,11 +52,11 @@ func NewPool[T Instance](count int, creator CreateInstance[T], def Runner[T]) *P
 	}
 	mu := new(sync.Mutex)
 	return &Pool[T]{
-		BootErrors: make(chan error, bootErrorChanCap),
+		BootErrors: make(chan error, 16),
 		creator:    creator,
 		defaultJob: def,
 		instances:  instances,
-		jobs:       make(chan Runner[T]),
+		jobs:       make(chan Runner[T]),	// communication
 		mu:         mu,
 		cv:         sync.NewCond(mu),
 	}
@@ -104,8 +102,12 @@ func (p *Pool[T]) Loop(ctx context.Context) {
 	wg.Add(len(p.instances))
 	for _, inst := range p.instances {
 		go func() {
+			// Annotion: start vn instance for fuzzerInstance
+			// Annation: dead loop if ctx.Err() does no error => execute mgr.fuzzerInstance forever
 			for ctx.Err() == nil {
+				log.Logf(0,"%v loop start\n",inst.idx)
 				p.runInstance(ctx, inst)
+				log.Logf(0,"%v loop end\n",inst.idx)
 			}
 			wg.Done()
 		}()
@@ -116,8 +118,8 @@ func (p *Pool[T]) Loop(ctx context.Context) {
 func (p *Pool[T]) runInstance(ctx context.Context, inst *poolInstance[T]) {
 	p.waitUnpaused()
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	log.Logf(2, "pool: booting instance %d", inst.idx)
+
+	log.Logf(0, "pool: booting instance %d", inst.idx)
 
 	inst.reset(cancel)
 
@@ -125,9 +127,12 @@ func (p *Pool[T]) runInstance(ctx context.Context, inst *poolInstance[T]) {
 	inst.status(StateBooting)
 	defer inst.status(StateOffline)
 
-	obj, err := p.creator(ctx, inst.idx)
+	// Annotation: real run a instance creator function
+	// Annotation: func (pool *Pool) Create(index int) (*Instance, error) => in vm/vm.go 
+	// Annotation: creator assign in location => func (pool *Pool) Create(index int) (*Instance, error) 
+	obj, err := p.creator(inst.idx)
 	if err != nil {
-		p.reportBootError(ctx, err)
+		p.BootErrors <- err
 		return
 	}
 	defer obj.Close()
@@ -152,22 +157,11 @@ func (p *Pool[T]) runInstance(ctx context.Context, inst *poolInstance[T]) {
 	}
 
 	inst.status(StateRunning)
-	job(ctx, obj, inst.updateInfo)
-}
 
-func (p *Pool[T]) reportBootError(ctx context.Context, err error) {
-	select {
-	case p.BootErrors <- err:
-		return
-	default:
-		// Print some log message to make it visible.
-		log.Logf(0, "WARNING: boot error channel is full!")
-	}
-	select {
-	case p.BootErrors <- err:
-	case <-ctx.Done():
-		// On context cancellation, no one might be listening on the channel.
-	}
+	// Annotation: job is NewDispatcher => assign in manager.go (mgr.pool = vm.NewDispatcher(mgr.vmPool, mgr.fuzzerInstance))
+	// Annotation: this job will execute forever (not exit) if inst does not error
+	// Annotation: execution NewDispatcher job will be traped in function: mon.monitorExecution()
+	job(ctx, obj, inst.updateInfo)
 }
 
 // ReserveForRun specifies the size of the sub-pool for the execution of custom runners.
@@ -204,24 +198,13 @@ func (p *Pool[T]) ReserveForRun(count int) {
 }
 
 // Run blocks until it has found an instance to execute job and until job has finished.
-// Returns an error if the job was aborted by cancelling the context.
-func (p *Pool[T]) Run(ctx context.Context, job Runner[T]) error {
-	done := make(chan error)
-	// Submit the job.
-	select {
-	case p.jobs <- func(jobCtx context.Context, inst T, upd UpdateInfo) {
-		mergedCtx, cancel := mergeContextCancel(jobCtx, ctx)
-		defer cancel()
-
-		job(mergedCtx, inst, upd)
-		done <- mergedCtx.Err()
-	}:
-	case <-ctx.Done():
-		// If the loop is aborted, no one is going to pick up the job.
-		return ctx.Err()
+func (p *Pool[T]) Run(job Runner[T]) {
+	done := make(chan struct{})
+	p.jobs <- func(ctx context.Context, inst T, upd UpdateInfo) {
+		job(ctx, inst, upd)
+		close(done)
 	}
-	// Await the job.
-	return <-done
+	<-done
 }
 
 func (p *Pool[T]) Total() int {
@@ -338,16 +321,4 @@ func (pi *poolInstance[T]) free(job Runner[T]) {
 		return
 	default:
 	}
-}
-
-func mergeContextCancel(main, monitor context.Context) (context.Context, func()) {
-	withCancel, cancel := context.WithCancel(main)
-	go func() {
-		select {
-		case <-withCancel.Done():
-		case <-monitor.Done():
-		}
-		cancel()
-	}()
-	return withCancel, cancel
 }

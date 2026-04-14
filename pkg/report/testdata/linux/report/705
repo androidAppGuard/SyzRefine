@@ -1,5 +1,4 @@
 TITLE: go runtime error
-TYPE: DoS
 SUPPRESSED: Y
 
 runtime: out of memory: cannot allocate 1073741824-byte block (6446022656 in use)

@@ -11,7 +11,6 @@
 package cuttlefish
 
 import (
-	"context"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -66,8 +65,8 @@ func (pool *Pool) Count() int {
 	return pool.gcePool.Count()
 }
 
-func (pool *Pool) Create(ctx context.Context, workdir string, index int) (vmimpl.Instance, error) {
-	gceInst, err := pool.gcePool.Create(ctx, workdir, index)
+func (pool *Pool) Create(workdir string, index int) (vmimpl.Instance, error) {
+	gceInst, err := pool.gcePool.Create(workdir, index)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create underlying gce instance: %w", err)
 	}
@@ -168,9 +167,9 @@ func (inst *instance) Close() error {
 	return inst.gceInst.Close()
 }
 
-func (inst *instance) Run(ctx context.Context, command string) (
+func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command string) (
 	<-chan []byte, <-chan error, error) {
-	return inst.gceInst.Run(ctx, fmt.Sprintf("adb shell 'cd %s; %s'", deviceRoot, command))
+	return inst.gceInst.Run(timeout, stop, fmt.Sprintf("adb shell 'cd %s; %s'", deviceRoot, command))
 }
 
 func (inst *instance) Diagnose(rep *report.Report) ([]byte, bool) {

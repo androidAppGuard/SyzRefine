@@ -18,12 +18,10 @@ type ReportService struct {
 	reportRepo     *db.ReportRepository
 	seriesService  *SeriesService
 	findingService *FindingService
-	urls           *api.URLGenerator
 }
 
 func NewReportService(env *app.AppEnvironment) *ReportService {
 	return &ReportService{
-		urls:           env.URLs,
 		reportRepo:     db.NewReportRepository(env.Spanner),
 		seriesService:  NewSeriesService(env),
 		findingService: NewFindingService(env),
@@ -31,6 +29,20 @@ func NewReportService(env *app.AppEnvironment) *ReportService {
 }
 
 var ErrReportNotFound = errors.New("report is not found")
+
+func (rs *ReportService) Update(ctx context.Context, id string, req *api.UpdateReportReq) error {
+	// TODO: validate the link?
+	err := rs.reportRepo.Update(ctx, id, func(rep *db.SessionReport) error {
+		if req.Link != "" {
+			rep.Link = req.Link
+		}
+		return nil
+	})
+	if errors.Is(err, db.ErrEntityNotFound) {
+		return ErrReportNotFound
+	}
+	return err
+}
 
 func (rs *ReportService) Confirm(ctx context.Context, id string) error {
 	err := rs.reportRepo.Update(ctx, id, func(rep *db.SessionReport) error {
@@ -60,7 +72,6 @@ func (rs *ReportService) Upstream(ctx context.Context, id string, req *api.Upstr
 	// prevent duplications.
 	err = rs.reportRepo.Insert(ctx, &db.SessionReport{
 		SessionID: rep.SessionID,
-		Reporter:  rep.Reporter,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to schedule a new report: %w", err)
@@ -68,10 +79,8 @@ func (rs *ReportService) Upstream(ctx context.Context, id string, req *api.Upstr
 	return nil
 }
 
-const maxFindingsPerReport = 5
-
-func (rs *ReportService) Next(ctx context.Context, reporter string) (*api.NextReportResp, error) {
-	list, err := rs.reportRepo.ListNotReported(ctx, reporter, 1)
+func (rs *ReportService) Next(ctx context.Context) (*api.NextReportResp, error) {
+	list, err := rs.reportRepo.ListNotReported(ctx, 1)
 	if err != nil {
 		return nil, err
 	} else if len(list) != 1 {
@@ -82,7 +91,7 @@ func (rs *ReportService) Next(ctx context.Context, reporter string) (*api.NextRe
 	if err != nil {
 		return nil, fmt.Errorf("failed to query series: %w", err)
 	}
-	findings, err := rs.findingService.List(ctx, report.SessionID, maxFindingsPerReport)
+	findings, err := rs.findingService.List(ctx, report.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query findings: %w", err)
 	}
@@ -91,7 +100,6 @@ func (rs *ReportService) Next(ctx context.Context, reporter string) (*api.NextRe
 			ID:         report.ID,
 			Moderation: report.Moderation,
 			Series:     series,
-			Link:       rs.urls.Series(series.ID),
 			Findings:   findings,
 		},
 	}, nil

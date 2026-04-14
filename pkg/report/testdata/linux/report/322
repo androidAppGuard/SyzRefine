@@ -1,5 +1,4 @@
 TITLE: kernel panic: stack is corrupted in ip6_xmit
-TYPE: DoS
 
 [  122.900948] Kernel panic - not syncing: stack-protector: Kernel stack is corrupted in: ffffffff8343632e
 [  122.900948] 

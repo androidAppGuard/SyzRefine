@@ -95,7 +95,6 @@ func test(t *testing.T, sysTarget *targets.Target) {
 			want := flatrpc.FeatureCoverage |
 				flatrpc.FeatureExtraCoverage |
 				flatrpc.FeatureDelayKcovMmap |
-				flatrpc.FeatureKcovResetIoctl |
 				flatrpc.FeatureSandboxNone |
 				flatrpc.FeatureFault |
 				flatrpc.FeatureNetDevices |
@@ -109,7 +108,7 @@ func test(t *testing.T, sysTarget *targets.Target) {
 				flatrpc.FeatureSwap
 			for feat, name := range flatrpc.EnumNamesFeature {
 				if features&feat != want&feat {
-					t.Errorf("expect feature %v to be %v, but it is %v",
+					t.Errorf("expect featue %v to be %v, but it is %v",
 						name, want&feat != 0, features&feat != 0)
 				}
 			}
@@ -485,7 +484,6 @@ func startRPCServer(t *testing.T, target *prog.Target, executor string,
 		// We don't need many procs for this test.
 		procs = min(procs, 4)
 	}
-	var output bytes.Buffer
 	cfg := &rpcserver.LocalConfig{
 		Config: rpcserver.Config{
 			Config: vminfo.Config{
@@ -506,8 +504,6 @@ func startRPCServer(t *testing.T, target *prog.Target, executor string,
 		GDB:         *flagGDB,
 		MaxSignal:   extra.maxSignal,
 		CoverFilter: extra.coverFilter,
-		// Note that when *flagGDB is set, the option is ignored.
-		OutputWriter: &output,
 	}
 	cfg.MachineChecked = func(features flatrpc.Feature, syscalls map[*prog.Syscall]bool) queue.Source {
 		if extra.machineChecked != nil {
@@ -524,7 +520,6 @@ func startRPCServer(t *testing.T, target *prog.Target, executor string,
 	t.Cleanup(func() {
 		done()
 		if err := <-errc; err != nil {
-			t.Logf("executor output:\n%s", output.String())
 			t.Fatal(err)
 		}
 		// We need to retry b/c we don't wait for all executor subprocesses (only set PR_SET_PDEATHSIG),
@@ -537,7 +532,6 @@ func startRPCServer(t *testing.T, target *prog.Target, executor string,
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
-			t.Logf("executor output:\n%s", output.String())
 			t.Fatalf("failed to remove temp dir %v: %v", dir, err)
 		}
 	})

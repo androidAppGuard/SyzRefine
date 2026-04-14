@@ -136,9 +136,12 @@ func parse(interner *Interner, s *bufio.Scanner) ([]Frame, error) {
 		return nil, fmt.Errorf("failed to parse pc '%v' in addr2line output: %w", s.Text(), err)
 	}
 	var frames []Frame
-	for s.Scan() {
+	for {
+		if !s.Scan() {
+			break
+		}
 		ln := s.Text()
-		if len(ln) >= 3 && ln[0] == '0' && ln[1] == 'x' {
+		if len(ln) > 3 && ln[0] == '0' && ln[1] == 'x' {
 			break
 		}
 		fn := ln
@@ -160,11 +163,8 @@ func parse(interner *Interner, s *bufio.Scanner) ([]Frame, error) {
 		}
 		file := ln[:colon]
 		line, err := strconv.Atoi(ln[colon+1 : lineEnd])
-		if err != nil || fn == "" || fn == "??" || file == "" || file == "??" || line < 0 {
+		if err != nil || fn == "" || fn == "??" || file == "" || file == "??" || line <= 0 {
 			continue
-		}
-		if line == 0 {
-			line = -1
 		}
 		frames = append(frames, Frame{
 			PC:     pc,

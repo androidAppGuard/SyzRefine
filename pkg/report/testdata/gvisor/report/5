@@ -1,5 +1,4 @@
 TITLE: panic: invalid segment range [ADDR, ADDR)
-TYPE: DoS
 
 panic: invalid segment range [0x401000, 0x401000)
 

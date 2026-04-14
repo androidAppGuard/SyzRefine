@@ -34,7 +34,8 @@ func GetPCBase(cfg *mgrconfig.Config) (uint64, error) {
 }
 
 func MakeReportGenerator(cfg *mgrconfig.Config, modules []*vminfo.KernelModule) (*ReportGenerator, error) {
-	impl, err := backend.Make(cfg, modules)
+	impl, err := backend.Make(cfg.SysTarget, cfg.Type, cfg.KernelObj,
+		cfg.KernelSrc, cfg.KernelBuildSrc, cfg.AndroidSplitBuild, cfg.ModuleObj, modules)
 	if err != nil {
 		return nil, err
 	}
@@ -104,9 +105,34 @@ func (rg *ReportGenerator) prepareFileMap(progs []Prog, force, debug bool) (file
 			}
 		}
 	}
-	err := rg.frame2line(files, pcToProgs, progs)
-	if err != nil {
-		return nil, err
+	matchedPC := false
+	for _, frame := range rg.Frames {
+		f := fileByFrame(files, frame)
+		ln := f.lines[frame.StartLine]
+		coveredBy := pcToProgs[frame.PC]
+		if len(coveredBy) == 0 {
+			f.uncovered = append(f.uncovered, frame.Range)
+			continue
+		}
+		// Covered frame.
+		f.covered = append(f.covered, frame.Range)
+		matchedPC = true
+		if ln.progCount == nil {
+			ln.progCount = make(map[int]bool)
+			ln.pcProgCount = make(map[uint64]int)
+			ln.progIndex = -1
+		}
+		for progIndex := range coveredBy {
+			ln.progCount[progIndex] = true
+			if ln.progIndex == -1 || len(progs[progIndex].Data) < len(progs[ln.progIndex].Data) {
+				ln.progIndex = progIndex
+			}
+			ln.pcProgCount[frame.PC]++
+		}
+		f.lines[frame.StartLine] = ln
+	}
+	if !matchedPC {
+		return nil, fmt.Errorf("coverage doesn't match any coverage callbacks")
 	}
 	// If the backend provided coverage callback locations for the binaries, use them to
 	// verify data returned by kcov.
@@ -140,42 +166,6 @@ func (rg *ReportGenerator) prepareFileMap(progs []Prog, force, debug bool) (file
 		})
 	}
 	return files, nil
-}
-
-func (rg *ReportGenerator) frame2line(files fileMap, pcToProgs map[uint64]map[int]bool, progs []Prog) error {
-	matchedPC := false
-	for _, frame := range rg.Frames {
-		if frame.StartLine < 0 {
-			continue
-		}
-		f := fileByFrame(files, frame)
-		ln := f.lines[frame.StartLine]
-		coveredBy := pcToProgs[frame.PC]
-		if len(coveredBy) == 0 {
-			f.uncovered = append(f.uncovered, frame.Range)
-			continue
-		}
-		// Covered frame.
-		f.covered = append(f.covered, frame.Range)
-		matchedPC = true
-		if ln.progCount == nil {
-			ln.progCount = make(map[int]bool)
-			ln.pcProgCount = make(map[uint64]int)
-			ln.progIndex = -1
-		}
-		for progIndex := range coveredBy {
-			ln.progCount[progIndex] = true
-			if ln.progIndex == -1 || len(progs[progIndex].Data) < len(progs[ln.progIndex].Data) {
-				ln.progIndex = progIndex
-			}
-			ln.pcProgCount[frame.PC]++
-		}
-		f.lines[frame.StartLine] = ln
-	}
-	if !matchedPC {
-		return fmt.Errorf("coverage doesn't match any coverage callbacks")
-	}
-	return nil
 }
 
 func contains(pcs []uint64, pc uint64) bool {

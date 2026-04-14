@@ -43,6 +43,8 @@ func (dist *Distributor) Next(vm int) *Request {
 		return req
 	}
 	for {
+		// Annoation: source object is orderImpl, which next is assign in fuzzer.go (ret.source = queue.Order()
+		// Annoation: thus, Next will call: func (o *orderImpl) Next() *Request { in queue.go
 		req := dist.source.Next()
 		if req == nil || !contains(req.Avoid, vm) || !dist.hasOtherActive(req.Avoid) {
 			return req

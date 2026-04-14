@@ -64,6 +64,7 @@ type RemoteConfig struct {
 	Debug   bool
 }
 
+//go:generate ../../tools/mockery.sh --name Manager --output ./mocks
 type Manager interface {
 	MaxSignal() signal.Signal
 	BugFrames() (leaks []string, races []string)
@@ -111,11 +112,10 @@ type server struct {
 }
 
 type Stats struct {
-	StatExecs            *stat.Val
-	StatNumFuzzing       *stat.Val
-	StatVMRestarts       *stat.Val
-	StatModules          *stat.Val
-	StatExecutorRestarts *stat.Val
+	StatExecs      *stat.Val
+	StatNumFuzzing *stat.Val
+	StatVMRestarts *stat.Val
+	StatModules    *stat.Val
 }
 
 func NewStats() Stats {
@@ -140,8 +140,6 @@ func NewNamedStats(name string) Stats {
 			stat.Rate{}, stat.NoGraph),
 		StatModules: stat.New("modules"+suffix, "Number of loaded kernel modules",
 			stat.NoGraph, stat.Link("/modules"+linkSuffix)),
-		StatExecutorRestarts: stat.New("executor restarts"+suffix,
-			"Number of times executor process was restarted", stat.Rate{}, stat.Graph("executor")),
 	}
 }
 
@@ -204,7 +202,7 @@ func newImpl(cfg *Config, mgr Manager) *server {
 		runners:     make(map[int]*Runner),
 		checker:     checker,
 		baseSource:  baseSource,
-		execSource:  queue.Distribute(queue.Retry(baseSource)),
+		execSource:  queue.Distribute(queue.Retry(baseSource)), // only one *queue.Distributor object
 		onHandshake: make(chan *handshakeResult, 1),
 
 		Stats: cfg.Stats,
@@ -212,7 +210,8 @@ func newImpl(cfg *Config, mgr Manager) *server {
 			statExecRetries: stat.New("exec retries",
 				"Number of times a test program was restarted because the first run failed",
 				stat.Rate{}, stat.Graph("executor")),
-			statExecutorRestarts:   cfg.Stats.StatExecutorRestarts,
+			statExecutorRestarts: stat.New("executor restarts",
+				"Number of times executor process was restarted", stat.Rate{}, stat.Graph("executor")),
 			statExecBufferTooSmall: queue.StatExecBufferTooSmall,
 			statExecs:              cfg.Stats.StatExecs,
 			statNoExecRequests:     queue.StatNoExecRequests,
@@ -239,8 +238,13 @@ var errFatal = errors.New("aborting RPC server")
 
 func (serv *server) Serve(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
+	// Annotation: function 1
 	g.Go(func() error {
 		return serv.serv.Serve(ctx, func(ctx context.Context, conn *flatrpc.Conn) error {
+			// Annotation: a loop for consuming the jobs produced by fuzzerObj
+			// Annotation: each connection will call function: serv.handleConn(ctx, conn)
+			// Annotation: when executor start, it will connect this connection
+			log.Logf(0,"serv.handleConn(ctx, conn)")
 			err := serv.handleConn(ctx, conn)
 			if err != nil && !errors.Is(err, errFatal) {
 				log.Logf(2, "%v", err)
@@ -249,6 +253,7 @@ func (serv *server) Serve(ctx context.Context) error {
 			return err
 		})
 	})
+	// Annotation: function 2
 	g.Go(func() error {
 		var info *handshakeResult
 		select {
@@ -258,6 +263,7 @@ func (serv *server) Serve(ctx context.Context) error {
 		}
 		// We run the machine check specifically from the top level context,
 		// not from the per-connection one.
+		// Annotation: create a fuzzerObj (generae initial candidates to execute)
 		return serv.runCheck(ctx, info)
 	})
 	return g.Wait()
@@ -475,10 +481,12 @@ func (serv *server) runCheck(ctx context.Context, info *handshakeResult) error {
 	}
 	enabledFeatures := features.Enabled()
 	serv.setupFeatures = features.NeedSetup()
+	// Annotation: 3. create a fuzzerObj and return the source( that saves all the queues)
 	newSource, err := serv.mgr.MachineChecked(enabledFeatures, enabledCalls)
 	if err != nil {
 		return err
 	}
+	// Annotation: here implement source share [then the queues saved in source can share]
 	serv.baseSource.Store(newSource)
 	serv.checkDone.Store(true)
 	return nil
@@ -494,7 +502,7 @@ func (serv *server) printMachineCheck(checkFilesInfo []*flatrpc.FileInfo, enable
 				lines = append(lines, fmt.Sprintf("%-44v: %v\n", call.Name, reason))
 			}
 			sort.Strings(lines)
-			fmt.Fprintf(buf, "disabled the following syscalls:\n%s\n", strings.Join(lines, ""))
+			// fmt.Fprintf(buf, "disabled the following syscalls:\n%s\n", strings.Join(lines, ""))
 		}
 		if len(transitivelyDisabled) != 0 {
 			var lines []string
@@ -502,9 +510,9 @@ func (serv *server) printMachineCheck(checkFilesInfo []*flatrpc.FileInfo, enable
 				lines = append(lines, fmt.Sprintf("%-44v: %v\n", call.Name, reason))
 			}
 			sort.Strings(lines)
-			fmt.Fprintf(buf, "transitively disabled the following syscalls"+
-				" (missing resource [creating syscalls]):\n%s\n",
-				strings.Join(lines, ""))
+			// fmt.Fprintf(buf, "transitively disabled the following syscalls"+
+			// " (missing resource [creating syscalls]):\n%s\n",
+			// strings.Join(lines, ""))
 		}
 	}
 	hasFileErrors := false
@@ -537,7 +545,7 @@ func (serv *server) printMachineCheck(checkFilesInfo []*flatrpc.FileInfo, enable
 func (serv *server) CreateInstance(id int, injectExec chan<- bool, updInfo dispatcher.UpdateInfo) chan error {
 	runner := &Runner{
 		id:            id,
-		source:        serv.execSource,
+		source:        serv.execSource, // implementation in: execSource:  queue.Distribute(queue.Retry(baseSource)),
 		cover:         serv.cfg.Cover,
 		coverEdges:    serv.cfg.UseCoverEdges,
 		filterSignal:  serv.cfg.FilterSignal,
@@ -561,7 +569,7 @@ func (serv *server) CreateInstance(id int, injectExec chan<- bool, updInfo dispa
 	if serv.runners[id] != nil {
 		panic(fmt.Sprintf("duplicate instance %v", id))
 	}
-	serv.runners[id] = runner
+	serv.runners[id] = runner // create runner (so runner.requests is the commication between vm instance and host) TODO seed the program data
 	return runner.resultCh
 }
 

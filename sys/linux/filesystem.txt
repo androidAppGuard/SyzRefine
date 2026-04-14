@@ -86,7 +86,6 @@ blockdev_filename [
 	nbd		nbd_filename
 	loop		loop_filename
 	nullb		string["/dev/nullb0"]
-	rnullb		string["/dev/rnullb0"]
 	md0		string["/dev/md0"]
 	sg0		string["/dev/sg0"]
 	sr0		string["/dev/sr0"]
@@ -473,13 +472,13 @@ iso9660_options [
 
 iso9660_blocks = 512, 1024, 2048
 
-# Note that the "debug" option has been omitted since it's equivalent to "errors=panic".
 gfs2_options [
 	spectator		stringnoz["spectator"]
 	norecovery		stringnoz["norecovery"]
 	ignore_local_fs		stringnoz["ignore_local_fs"]
 	localflocks		stringnoz["localflocks"]
 	localcaching		stringnoz["localcaching"]
+	debug			stringnoz["debug"]
 	nodebug			stringnoz["nodebug"]
 	upgrade			stringnoz["upgrade"]
 	acl			stringnoz["acl"]

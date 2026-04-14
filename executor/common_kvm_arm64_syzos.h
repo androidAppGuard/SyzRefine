@@ -1,33 +1,34 @@
 // Copyright 2024 syzkaller project authors. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
-#ifndef EXECUTOR_COMMON_KVM_ARM64_SYZOS_H
-#define EXECUTOR_COMMON_KVM_ARM64_SYZOS_H
-
 // This file provides guest code running inside the ARM64 KVM.
 
-#include "common_kvm_syzos.h"
 #include "kvm.h"
 #include <linux/kvm.h>
 #include <stdbool.h>
 
-// Compilers will eagerly try to transform the switch statement in guest_main()
-// into a jump table, unless the cases are sparse enough.
-// We use prime numbers multiplied by 10 to prevent this behavior.
-// Remember these constants must match those in sys/linux/dev_kvm_arm64.txt.
+// Host will map the code in this section into the guest address space.
+#define GUEST_CODE __attribute__((section("guest")))
+
+// Prevent function inlining. This attribute is applied to every guest_handle_* function,
+// making sure they remain small so that the compiler does not attempt to be too clever
+// (e.g. generate switch tables).
+#define noinline __attribute__((noinline))
+
+// Start/end of the guest section.
+extern char *__start_guest, *__stop_guest;
+
 typedef enum {
-	SYZOS_API_UEXIT = 0,
-	SYZOS_API_CODE = 10,
-	SYZOS_API_MSR = 20,
-	SYZOS_API_SMC = 30,
-	SYZOS_API_HVC = 50,
-	SYZOS_API_IRQ_SETUP = 70,
-	SYZOS_API_MEMWRITE = 110,
-	SYZOS_API_ITS_SETUP = 130,
-	SYZOS_API_ITS_SEND_CMD = 170,
-	SYZOS_API_MRS = 190,
-	SYZOS_API_ERET = 230,
-	SYZOS_API_SVC = 290,
+	SYZOS_API_UEXIT,
+	SYZOS_API_CODE,
+	SYZOS_API_MSR,
+	SYZOS_API_SMC,
+	SYZOS_API_HVC,
+	SYZOS_API_IRQ_SETUP,
+	SYZOS_API_MEMWRITE,
+	SYZOS_API_ITS_SETUP,
+	SYZOS_API_ITS_SEND_CMD,
+	SYZOS_API_MRS,
 	SYZOS_API_STOP, // Must be the last one
 } syzos_api_id;
 
@@ -92,18 +93,16 @@ struct api_call_its_send_cmd {
 	uint32 cpuid2;
 };
 
-GUEST_CODE static void guest_uexit(uint64 exit_code);
-GUEST_CODE static void guest_execute_code(uint32* insns, uint64 size);
-GUEST_CODE static void guest_handle_mrs(uint64 reg);
-GUEST_CODE static void guest_handle_msr(uint64 reg, uint64 val);
-GUEST_CODE static void guest_handle_smc(struct api_call_smccc* cmd);
-GUEST_CODE static void guest_handle_hvc(struct api_call_smccc* cmd);
-GUEST_CODE static void guest_handle_svc(struct api_call_smccc* cmd);
-GUEST_CODE static void guest_handle_eret(uint64 unused);
-GUEST_CODE static void guest_handle_irq_setup(struct api_call_irq_setup* cmd);
-GUEST_CODE static void guest_handle_memwrite(struct api_call_memwrite* cmd);
-GUEST_CODE static void guest_handle_its_setup(struct api_call_3* cmd);
-GUEST_CODE static void guest_handle_its_send_cmd(struct api_call_its_send_cmd* cmd);
+static void guest_uexit(uint64 exit_code);
+static void guest_execute_code(uint32* insns, uint64 size);
+static void guest_handle_mrs(uint64 reg);
+static void guest_handle_msr(uint64 reg, uint64 val);
+static void guest_handle_smc(struct api_call_smccc* cmd);
+static void guest_handle_hvc(struct api_call_smccc* cmd);
+static void guest_handle_irq_setup(struct api_call_irq_setup* cmd);
+static void guest_handle_memwrite(struct api_call_memwrite* cmd);
+static void guest_handle_its_setup(struct api_call_3* cmd);
+static void guest_handle_its_send_cmd(struct api_call_its_send_cmd* cmd);
 
 typedef enum {
 	UEXIT_END = (uint64)-1,
@@ -146,21 +145,12 @@ guest_main(uint64 size, uint64 cpu)
 			guest_handle_msr(ccmd->args[0], ccmd->args[1]);
 			break;
 		}
-		case SYZOS_API_ERET: {
-			struct api_call_1* ccmd = (struct api_call_1*)cmd;
-			guest_handle_eret(ccmd->arg);
-			break;
-		}
 		case SYZOS_API_SMC: {
 			guest_handle_smc((struct api_call_smccc*)cmd);
 			break;
 		}
 		case SYZOS_API_HVC: {
 			guest_handle_hvc((struct api_call_smccc*)cmd);
-			break;
-		}
-		case SYZOS_API_SVC: {
-			guest_handle_svc((struct api_call_smccc*)cmd);
 			break;
 		}
 		case SYZOS_API_IRQ_SETUP: {
@@ -186,38 +176,8 @@ guest_main(uint64 size, uint64 cpu)
 	guest_uexit((uint64)-1);
 }
 
-// Some ARM chips use 128-byte cache lines. Pick 256 to be on the safe side.
-#define MAX_CACHE_LINE_SIZE 256
-
-GUEST_CODE static noinline void
-flush_cache_range(void* addr, uint64 size)
-{
-	uint64 start = (uint64)addr;
-	uint64 end = start + size;
-
-	// For self-modifying code, we must clean the D-cache and invalidate the
-	// I-cache for the memory range that was modified. This is the sequence
-	// mandated by the ARMv8-A architecture.
-
-	// 1. Clean D-cache over the whole range to the Point of Unification.
-	for (uint64 i = start; i < end; i += MAX_CACHE_LINE_SIZE)
-		asm volatile("dc cvau, %[addr]" : : [addr] "r"(i) : "memory");
-	// 2. Wait for the D-cache clean to complete.
-	asm volatile("dsb sy" : : : "memory");
-
-	// 3. Invalidate I-cache over the whole range.
-	for (uint64 i = start; i < end; i += MAX_CACHE_LINE_SIZE)
-		asm volatile("ic ivau, %[addr]" : : [addr] "r"(i) : "memory");
-	// 4. Wait for the I-cache invalidate to complete.
-	asm volatile("dsb sy" : : : "memory");
-
-	// 5. Flush pipeline to force re-fetch of new instruction.
-	asm volatile("isb" : : : "memory");
-}
-
 GUEST_CODE static noinline void guest_execute_code(uint32* insns, uint64 size)
 {
-	flush_cache_range(insns, size);
 	volatile void (*fn)() = (volatile void (*)())insns;
 	fn();
 }
@@ -259,6 +219,9 @@ GUEST_CODE static uint32 get_cpu_id()
 	return (uint32)val;
 }
 
+// Some ARM chips use 128-byte cache lines. Pick 256 to be on the safe side.
+#define MAX_CACHE_LINE_SIZE 256
+
 // Read the value from a system register using an MRS instruction.
 GUEST_CODE static noinline void
 guest_handle_mrs(uint64 reg)
@@ -269,18 +232,11 @@ guest_handle_mrs(uint64 reg)
 	uint32* insn = (uint32*)((uint64)ARM64_ADDR_SCRATCH_CODE + cpu_id * MAX_CACHE_LINE_SIZE);
 	insn[0] = mrs;
 	insn[1] = 0xd65f03c0; // RET
-	flush_cache_range(insn, 8);
 	// Make a call to the generated MSR instruction and clobber x0.
 	asm("blr %[pc]\n"
 	    :
 	    : [pc] "r"(insn)
 	    : "x0", "x30");
-}
-
-GUEST_CODE static noinline void
-guest_handle_eret(uint64 unused)
-{
-	asm("eret\n" : : : "memory");
 }
 
 // Write value to a system register using an MSR instruction.
@@ -294,7 +250,6 @@ guest_handle_msr(uint64 reg, uint64 val)
 	uint32* insn = (uint32*)((uint64)ARM64_ADDR_SCRATCH_CODE + cpu_id * MAX_CACHE_LINE_SIZE);
 	insn[0] = msr;
 	insn[1] = 0xd65f03c0; // RET
-	flush_cache_range(insn, 8);
 	// Put `val` into x0 and make a call to the generated MSR instruction.
 	asm("mov x0, %[val]\nblr %[pc]\n"
 	    :
@@ -337,28 +292,6 @@ GUEST_CODE static noinline void guest_handle_hvc(struct api_call_smccc* cmd)
 	    "mov x5, %[arg5]\n"
 	    // TODO(glider): nonzero immediate values are designated for use by hypervisor vendors.
 	    "hvc #0\n"
-	    : // Ignore the outputs for now
-	    : [func_id] "r"((uint64)cmd->func_id),
-	      [arg1] "r"(cmd->params[0]), [arg2] "r"(cmd->params[1]),
-	      [arg3] "r"(cmd->params[2]), [arg4] "r"(cmd->params[3]),
-	      [arg5] "r"(cmd->params[4])
-	    : "x0", "x1", "x2", "x3", "x4", "x5",
-	      // These registers are not used above, but may be clobbered by the HVC call.
-	      "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17",
-	      "memory");
-}
-
-GUEST_CODE static noinline void guest_handle_svc(struct api_call_smccc* cmd)
-{
-	asm volatile(
-	    "mov x0, %[func_id]\n"
-	    "mov x1, %[arg1]\n"
-	    "mov x2, %[arg2]\n"
-	    "mov x3, %[arg3]\n"
-	    "mov x4, %[arg4]\n"
-	    "mov x5, %[arg5]\n"
-	    // TODO(glider): nonzero immediate values are designated for use by hypervisor vendors.
-	    "svc #0\n"
 	    : // Ignore the outputs for now
 	    : [func_id] "r"((uint64)cmd->func_id),
 	      [arg1] "r"(cmd->params[0]), [arg2] "r"(cmd->params[1]),
@@ -593,7 +526,8 @@ GUEST_CODE static void gicv3_cpu_init(uint32 cpu)
 	// Enable the GIC system register (ICC_*) access.
 	uint64 icc_sre_el1 = 0;
 	asm volatile("mrs %0, " ICC_SRE_EL1
-		     : "=r"(icc_sre_el1));
+		     :
+		     : "r"(icc_sre_el1));
 	icc_sre_el1 |= ICC_SRE_EL1_SRE;
 	asm volatile("msr " ICC_SRE_EL1 ", %0"
 		     :
@@ -767,7 +701,9 @@ one_irq_handler_fn()
 	       eret)"
 	    :
 	    :
-	    : "memory");
+	    : "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+	      "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25",
+	      "x26", "x27", "x28", "x29", "x30", "memory");
 }
 
 #ifdef __cplusplus
@@ -1053,6 +989,10 @@ GUEST_CODE static void its_init(uint64 coll_tbl,
 #define GITS_CMD_CLEAR 0x04
 #define GITS_CMD_SYNC 0x05
 
+#define GENMASK_ULL(h, l)                   \
+	(((~0ULL) - (1ULL << (l)) + 1ULL) & \
+	 (~0ULL >> (63 - (h))))
+
 // Avoid inlining this function, because it may cause emitting constants into .rodata.
 GUEST_CODE static noinline void
 its_mask_encode(uint64* raw_cmd, uint64 val, int h, int l)
@@ -1194,8 +1134,7 @@ GUEST_CODE static void its_send_movall_cmd(uint64 cmdq_base, uint32 vcpu_id, uin
 	its_send_cmd(cmdq_base, &cmd);
 }
 
-GUEST_CODE static void
-its_send_invall_cmd(uint64 cmdq_base, uint32 collection_id)
+GUEST_CODE static void its_send_invall_cmd(uint64 cmdq_base, uint32 collection_id)
 {
 	struct its_cmd_block cmd;
 	guest_memzero(&cmd, sizeof(cmd));
@@ -1351,5 +1290,3 @@ GUEST_CODE static void guest_prepare_its(int nr_cpus, int nr_devices, int nr_eve
 	guest_setup_its_mappings(ARM64_ADDR_ITS_CMDQ_BASE, ARM64_ADDR_ITS_ITT_TABLES, nr_events, nr_devices, nr_cpus);
 	guest_invalidate_all_rdists(ARM64_ADDR_ITS_CMDQ_BASE, nr_cpus);
 }
-
-#endif // EXECUTOR_COMMON_KVM_ARM64_SYZOS_H

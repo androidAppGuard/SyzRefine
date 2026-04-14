@@ -59,6 +59,7 @@ func (inst *instance) qmpConnCheck() error {
 	}
 
 	addr := fmt.Sprintf("127.0.0.1:%v", inst.monport)
+	log.Logf(0,"qmpConnCheck call net.Dial")
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return err

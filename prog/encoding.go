@@ -8,8 +8,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/syzkaller/pkg/image"
 )
@@ -26,30 +28,57 @@ func (p *Prog) String() string {
 	return buf.String()
 }
 
-type SerializeFlag int
+func (p *Prog) Serialize() []byte {
+	return p.serialize(false)
+}
 
-const (
-	// Include all field values, even if they have default values.
-	Verbose SerializeFlag = 0
-	// Don't serialize compressed fs images.
-	// This is used in coverage report generation to prevent the bloating of the resulting HTML file.
-	SkipImages SerializeFlag = 1
-)
+func (p *Prog) Serialize_consume() []byte {
+	contex := p.serialize(false)
+	return TruncateLongStrings(contex)
+}
 
-func (p *Prog) Serialize(flags ...SerializeFlag) []byte {
+// TruncateLongStrings 查找所有双引号包裹的字符串，超长则截断，但跳过包含 rN= 的字符串
+func TruncateLongStrings(data []byte) []byte {
+	// 匹配双引号包裹的字符串（处理了转义引号 \"）
+	re := regexp.MustCompile(`"(?:\\.|[^"\\])*"`)
+
+	// 用于匹配 r0=, r1=, r12= 等模式的正则
+	// \br\d+= 表示以 r 开头，后面跟至少一个数字，最后是等号，且 r 前面是单词边界
+	skipRe := regexp.MustCompile(`\br\d+=`)
+
+	return re.ReplaceAllFunc(data, func(match []byte) []byte {
+		// 1. 检查是否包含 r0=, r1= 等特殊模式，如果包含则原样返回（跳过）
+		if skipRe.Match(match) {
+			return match
+		}
+
+		// 2. 剥离首尾双引号进行长度判断
+		inner := match[1 : len(match)-1]
+
+		// 3. 长度检查与截断
+		if utf8.RuneCount(inner) > 200 {
+			runes := []rune(string(inner))
+			// 截断前 50 个字符
+			truncated := string(runes[:200])
+			// 重新包装双引号
+			return []byte(`"` + truncated + `"`)
+		}
+
+		return match
+	})
+}
+
+func (p *Prog) SerializeVerbose() []byte {
+	return p.serialize(true)
+}
+
+func (p *Prog) serialize(verbose bool) []byte {
 	p.debugValidate()
 	ctx := &serializer{
-		target: p.Target,
-		buf:    new(bytes.Buffer),
-		vars:   make(map[*ResultArg]int),
-	}
-	for _, flag := range flags {
-		switch flag {
-		case Verbose:
-			ctx.verbose = true
-		case SkipImages:
-			ctx.skipImages = true
-		}
+		target:  p.Target,
+		buf:     new(bytes.Buffer),
+		vars:    make(map[*ResultArg]int),
+		verbose: verbose,
 	}
 	for _, c := range p.Calls {
 		ctx.call(c)
@@ -57,17 +86,12 @@ func (p *Prog) Serialize(flags ...SerializeFlag) []byte {
 	return ctx.buf.Bytes()
 }
 
-func (p *Prog) SerializeVerbose() []byte {
-	return p.Serialize(Verbose)
-}
-
 type serializer struct {
-	target     *Target
-	buf        *bytes.Buffer
-	vars       map[*ResultArg]int
-	varSeq     int
-	verbose    bool
-	skipImages bool
+	target  *Target
+	buf     *bytes.Buffer
+	vars    map[*ResultArg]int
+	varSeq  int
+	verbose bool
 }
 
 func (ctx *serializer) print(text string) {
@@ -168,11 +192,7 @@ func (a *DataArg) serialize(ctx *serializer) {
 	}
 	data := a.Data()
 	if typ.IsCompressed() {
-		if ctx.skipImages {
-			ctx.printf(`"<<IMAGE>>"`)
-		} else {
-			serializeCompressedData(ctx.buf, data)
-		}
+		serializeCompressedData(ctx.buf, data)
 	} else {
 		// Statically typed data will be padded with 0s during deserialization,
 		// so we can strip them here for readability always. For variable-size

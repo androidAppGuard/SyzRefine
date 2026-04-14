@@ -21,17 +21,15 @@ endef
 
 $(eval $(call build_image_rules,./controller,controller))
 $(eval $(call build_image_rules,./dashboard,web-dashboard))
-$(eval $(call build_image_rules,./reporter-server,reporter-server))
+$(eval $(call build_image_rules,./reporter,reporter))
 $(eval $(call build_image_rules,./series-tracker,series-tracker))
-$(eval $(call build_image_rules,./email-reporter,email-reporter))
+$(eval $(call build_image_rules,./db-mgmt,db-mgmt))
 $(eval $(call build_image_rules,./workflow/triage-step,triage-step))
 $(eval $(call build_image_rules,./workflow/build-step,build-step))
 $(eval $(call build_image_rules,./workflow/fuzz-step,fuzz-step))
 $(eval $(call build_image_rules,./workflow/boot-step,boot-step))
-$(eval $(call build_image_rules,./tools/db-mgmt,db-mgmt))
-$(eval $(call build_image_rules,./tools/send-test-email,send-test-email))
 
-IMAGES := controller web-dashboard reporter-server series-tracker db-mgmt triage-step build-step boot-step fuzz-step send-test-email email-reporter
+IMAGES := controller web-dashboard reporter series-tracker db-mgmt triage-step build-step boot-step fuzz-step
 BUILD_TARGETS := $(addprefix build-, $(IMAGES))
 PUSH_TARGETS := $(addprefix push-, $(IMAGES))
 
@@ -65,50 +63,17 @@ restart-spanner: build-db-mgmt
 	minikube addons enable cloud-spanner;
 	./run-local.sh db-mgmt migrate
 
-# It takes some time for K8S to set up Argo CRDs, so if we `kubectl apply` everything at once, it will not
-# work on the first attempt.
-# The following two targets facilitate CI/CD:
-# - k8s-config-argo installs Argo workflows.
-# - k8s-config-argo-wait awaits untill all CRDs are ready.
-k8s-config-argo:
-	@kubectl kustomize ./overlays/common/argo/
 
-k8s-config-argo-wait:
-	@kubectl wait --for condition=established --timeout=60s crd/cronworkflows.argoproj.io
-	@kubectl wait --for condition=established --timeout=60s crd/workflows.argoproj.io
-
-escape_sed_replacement = \
-    $(shell printf '%s' '$(subst ','\'',$(1))' | \
-    sed -e 's~\\~\\\\~g' \
-        -e 's~&~\\&~g' \
-        -e 's~\$$~\\$$~g' \
-        -e 's~/~\\/~g' \
-    )
-
-SED_EXPRESSIONS := \
-    -e "s~\$${IMAGE_PREFIX}~$(call escape_sed_replacement,${IMAGE_PREFIX})~g" \
-    -e "s~\$${IMAGE_TAG}~$(call escape_sed_replacement,${IMAGE_TAG})~g" \
-    -e "s~\$${SPANNER_DATABASE_URI}~$(call escape_sed_replacement,${SPANNER_DATABASE_URI})~g" \
-    -e "s~\$${WORKFLOW_ARTIFACTS_BUCKET}~$(call escape_sed_replacement,${WORKFLOW_ARTIFACTS_BUCKET})~g" \
-    -e "s~\$${BLOB_STORAGE_GCS_BUCKET}~$(call escape_sed_replacement,${BLOB_STORAGE_GCS_BUCKET})~g" \
+SUBSTITUTE_VARS := '$$IMAGE_PREFIX $$IMAGE_TAG $$SPANNER_DATABASE_URI $$BLOB_STORAGE_GCS_BUCKET $$WORKFLOW_ARTIFACTS_BUCKET'
 
 k8s-config-dev:
-	@kubectl kustomize ./overlays/minikube/ | sed $(SED_EXPRESSIONS)
+	@kubectl kustomize ./overlays/minikube/ | IMAGE_PREFIX=${IMAGE_PREFIX} IMAGE_TAG=${IMAGE_TAG} envsubst ${SUBSTITUTE_VARS}
 
-k8s-config-gke-prod: ensure-spanner-database-uri-env ensure-blob-storage-env ensure-workflow-artifacts-bucket
-	@kubectl kustomize ./overlays/gke/prod/ | sed $(SED_EXPRESSIONS)
+k8s-config-gke: ensure-spanner-database-uri-env ensure-blob-storage-env ensure-workflow-artifacts-bucket
+	@kubectl kustomize ./overlays/gke/ | IMAGE_PREFIX=${IMAGE_PREFIX} IMAGE_TAG=${IMAGE_TAG} envsubst ${SUBSTITUTE_VARS}
 
-k8s-config-gke-staging: ensure-spanner-database-uri-env ensure-blob-storage-env ensure-workflow-artifacts-bucket
-	@kubectl kustomize ./overlays/gke/staging/ | sed $(SED_EXPRESSIONS)
-
-migrate-job.yaml:
-	@cat tools/db-mgmt/migrate-job.yaml | sed $(SED_EXPRESSIONS)
-
-send-test-email-job.yaml:
-	@cat tools/send-test-email/job.yaml | sed $(SED_EXPRESSIONS)
-
-fetch-kernels-once.yaml:
-	@cat kernel-disk/fetch-kernels-once.yaml
+migrate-job.yaml: ensure-spanner-database-uri-env
+	@cat db-mgmt/migrate-job.yaml | IMAGE_PREFIX=${IMAGE_PREFIX} IMAGE_TAG=${IMAGE_TAG} envsubst
 
 ensure-spanner-database-uri-env:
 	@if [ -z "${SPANNER_DATABASE_URI}" ]; then \

@@ -49,10 +49,9 @@ func (target *Target) initAnyTypes() {
 }
 
 func (target *Target) getAnyPtrType(size uint64) *PtrType {
-	switch size {
-	case target.PtrSize:
+	if size == target.PtrSize {
 		return target.any.ptrPtr
-	case 8:
+	} else if size == 8 {
 		return target.any.ptr64
 	}
 	panic(fmt.Sprintf("bad pointer size %v", size))
@@ -64,15 +63,19 @@ func (target *Target) isAnyPtr(typ Type) bool {
 }
 
 type complexPtr struct {
-	arg  *PointerArg
-	call *Call
+	arg   *PointerArg
+	call  *Call
+	index int
 }
 
 func (p *Prog) complexPtrs() (res []complexPtr) {
-	for _, c := range p.Calls {
+	for index, c := range p.Calls {
+		// if p.Errnos[index] != 0 {
+		// 	continue
+		// }
 		ForeachArg(c, func(arg Arg, ctx *ArgCtx) {
 			if ptrArg, ok := arg.(*PointerArg); ok && p.Target.isComplexPtr(ptrArg) {
-				res = append(res, complexPtr{ptrArg, c})
+				res = append(res, complexPtr{ptrArg, c, index})
 				ctx.Stop = true
 			}
 		})

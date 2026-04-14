@@ -18,7 +18,6 @@ import (
 	"github.com/google/syzkaller/pkg/gcs"
 	"github.com/google/syzkaller/pkg/log"
 	_ "github.com/google/syzkaller/pkg/subsystem/lists"
-	"github.com/google/syzkaller/pkg/tool"
 )
 
 var (
@@ -55,7 +54,7 @@ func main() {
 }
 
 func do() error {
-	defer tool.Init()()
+	flag.Parse()
 	config := &covermerger.Config{
 		Jobs:    runtime.NumCPU(),
 		Workdir: *flagWorkdir,
@@ -71,17 +70,21 @@ func do() error {
 		panic(fmt.Sprintf("failed to parse time_to: %s", err.Error()))
 	}
 	dateFrom = dateTo.AddDays(-int(*flagDuration))
-	csvReader, err := covermerger.InitNsRecords(context.Background(),
+	dbReader := covermerger.MakeBQCSVReader()
+	if err = dbReader.InitNsRecords(context.Background(),
 		*flagNamespace,
 		*flagFilePathPrefix,
 		"",
 		dateFrom,
 		dateTo,
-	)
-	if err != nil {
+	); err != nil {
 		panic(fmt.Sprintf("failed to dbReader.InitNsRecords: %v", err.Error()))
 	}
-	defer csvReader.Close()
+	defer dbReader.Close()
+	csvReader, errReader := dbReader.Reader()
+	if errReader != nil {
+		panic(fmt.Sprintf("failed to dbReader.Reader: %v", errReader.Error()))
+	}
 	var wc io.WriteCloser
 	url := *flagToGCS
 	if *flagToDashAPI != "" {
@@ -120,11 +123,10 @@ func do() error {
 	if err != nil {
 		return fmt.Errorf("covermerger.MergeCSVWriteJSONL: %w", err)
 	}
-	if wc != nil {
-		if err := wc.Close(); err != nil {
-			return fmt.Errorf("wc.Close: %w", err)
-		}
+	if err := wc.Close(); err != nil {
+		return fmt.Errorf("wc.Close: %w", err)
 	}
+
 	printCoverage(totalInstrumentedLines, totalCoveredLines)
 	if *flagToDashAPI != "" {
 		// Merging may take hours. It is better to create new connection instead of reuse.

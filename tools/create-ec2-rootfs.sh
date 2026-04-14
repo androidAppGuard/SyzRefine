@@ -136,7 +136,7 @@ systemctl enable systemd-networkd
 
 cat << EOF > /etc/systemd/network/ether.network
 [Match]
-Name=*
+Driver=e1000
 
 [Network]
 DHCP=yes

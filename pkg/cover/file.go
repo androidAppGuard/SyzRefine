@@ -50,7 +50,6 @@ func RendFileCoverage(repo, forCommit, filePath string, fileProvider covermerger
 	return rendResult(files[repoCommit], mr, renderConfig), nil
 }
 
-// nolint:revive
 func GetMergeResult(c context.Context, ns, repo, forCommit, sourceCommit, filePath string,
 	proxy covermerger.FuncProxyURI, tp coveragedb.TimePeriod) (*covermerger.MergeResult, error) {
 	config := &covermerger.Config{
@@ -63,11 +62,21 @@ func GetMergeResult(c context.Context, ns, repo, forCommit, sourceCommit, filePa
 	}
 
 	fromDate, toDate := tp.DatesFromTo()
-	csvReader, err := covermerger.InitNsRecords(c, ns, filePath, sourceCommit, fromDate, toDate)
-	if err != nil {
-		return nil, fmt.Errorf("failed to covermerger.InitNsRecords: %w", err)
+	dbReader := covermerger.MakeBQCSVReader()
+	if err := dbReader.InitNsRecords(c,
+		ns,
+		filePath,
+		sourceCommit,
+		fromDate,
+		toDate,
+	); err != nil {
+		return nil, fmt.Errorf("failed to dbReader.InitNsRecords: %w", err)
 	}
-	defer csvReader.Close()
+	defer dbReader.Close()
+	csvReader, err := dbReader.Reader()
+	if err != nil {
+		return nil, fmt.Errorf("failed to dbReader.Reader: %w", err)
+	}
 
 	ch := make(chan *covermerger.FileMergeResult, 1)
 	if err := covermerger.MergeCSVData(c, config, csvReader, ch); err != nil {

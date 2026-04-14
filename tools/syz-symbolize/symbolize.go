@@ -24,7 +24,6 @@ var (
 	flagKernelObj = flag.String("kernel_obj", ".", "path to kernel build/obj dir")
 	flagKernelSrc = flag.String("kernel_src", "", "path to kernel sources (defaults to kernel_obj)")
 	flagOutDir    = flag.String("outdir", "", "output directory")
-	flagConfig    = flag.String("config", "", "optional configuration file")
 )
 
 func main() {
@@ -34,17 +33,11 @@ func main() {
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
-	var err error
-	cfg := &mgrconfig.Config{}
-	if *flagConfig != "" {
-		cfg, err = mgrconfig.LoadPartialFile(*flagConfig)
-	} else {
-		cfg, err = mgrconfig.LoadPartialData([]byte(`{
-			"kernel_obj": "` + *flagKernelObj + `",
-			"kernel_src": "` + *flagKernelSrc + `",
-			"target": "` + *flagOS + "/" + *flagArch + `"
-		}`))
-	}
+	cfg, err := mgrconfig.LoadPartialData([]byte(`{
+		"kernel_obj": "` + *flagKernelObj + `",
+		"kernel_src": "` + *flagKernelSrc + `",
+		"target": "` + *flagOS + "/" + *flagArch + `"
+	}`))
 	if err != nil {
 		tool.Fail(err)
 	}

@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -20,7 +19,6 @@ import (
 	"github.com/google/syzkaller/pkg/ast"
 	"github.com/google/syzkaller/pkg/clangtool"
 	"github.com/google/syzkaller/pkg/compiler"
-	"github.com/google/syzkaller/pkg/cover"
 	"github.com/google/syzkaller/pkg/declextract"
 	"github.com/google/syzkaller/pkg/ifaceprobe"
 	"github.com/google/syzkaller/pkg/mgrconfig"
@@ -37,58 +35,42 @@ var target = targets.Get(targets.Linux, targets.AMD64)
 
 func main() {
 	var (
-		flagConfig   = flag.String("config", "", "manager config file")
-		flagBinary   = flag.String("binary", "syz-declextract", "path to syz-declextract binary")
-		flagCoverage = flag.String("coverage", "", "syzbot coverage jsonl file")
-		flagArches   = flag.String("arches", "", "comma-separated list of arches to extract (all if empty)")
+		flagConfig = flag.String("config", "", "manager config file")
+		flagBinary = flag.String("binary", "syz-declextract", "path to syz-declextract binary")
 	)
 	defer tool.Init()()
-	mgrcfg, err := mgrconfig.LoadFile(*flagConfig)
+	cfg, err := mgrconfig.LoadFile(*flagConfig)
 	if err != nil {
 		tool.Fail(err)
 	}
 	loadProbeInfo := func() (*ifaceprobe.Info, error) {
-		return probe(mgrcfg, *flagConfig)
+		return probe(cfg, *flagConfig)
 	}
-	cfg := &config{
-		archList:      *flagArches,
-		autoFile:      filepath.FromSlash("sys/linux/auto.txt"),
-		coverFile:     *flagCoverage,
-		loadProbeInfo: loadProbeInfo,
-		Config: &clangtool.Config{
-			ToolBin:    *flagBinary,
-			KernelSrc:  mgrcfg.KernelSrc,
-			KernelObj:  mgrcfg.KernelObj,
-			CacheFile:  filepath.Join(mgrcfg.Workdir, "declextract.cache"),
-			DebugTrace: os.Stderr,
-		},
-	}
-	if _, err := run(cfg); err != nil {
+	if _, err := run(filepath.FromSlash("sys/linux/auto.txt"), loadProbeInfo, &clangtool.Config{
+		ToolBin:    *flagBinary,
+		KernelSrc:  cfg.KernelSrc,
+		KernelObj:  cfg.KernelObj,
+		CacheFile:  filepath.Join(cfg.Workdir, "declextract.cache"),
+		DebugTrace: os.Stderr,
+	}); err != nil {
 		tool.Fail(err)
 	}
 }
 
-type config struct {
-	archList      string
-	autoFile      string
-	coverFile     string
-	loadProbeInfo func() (*ifaceprobe.Info, error)
-	*clangtool.Config
-}
-
-func run(cfg *config) (*declextract.Result, error) {
-	out, probeInfo, coverage, syscallRename, err := prepare(cfg)
+func run(autoFile string, loadProbeInfo func() (*ifaceprobe.Info, error), cfg *clangtool.Config) (
+	*declextract.Result, error) {
+	out, probeInfo, syscallRename, err := prepare(loadProbeInfo, cfg)
 	if err != nil {
 		return nil, err
 	}
-	res, err := declextract.Run(out, probeInfo, coverage, syscallRename, cfg.DebugTrace)
+	res, err := declextract.Run(out, probeInfo, syscallRename, cfg.DebugTrace)
 	if err != nil {
 		return nil, err
 	}
-	if err := osutil.WriteFile(cfg.autoFile, res.Descriptions); err != nil {
+	if err := osutil.WriteFile(autoFile, res.Descriptions); err != nil {
 		return nil, err
 	}
-	if err := osutil.WriteFile(cfg.autoFile+".info", serialize(res.Interfaces)); err != nil {
+	if err := osutil.WriteFile(autoFile+".info", serialize(res.Interfaces)); err != nil {
 		return nil, err
 	}
 	// In order to remove unused bits of the descriptions, we need to write them out first,
@@ -96,7 +78,7 @@ func run(cfg *config) (*declextract.Result, error) {
 	// by manual descriptions (compiler.CollectUnused requires complete descriptions).
 	// This also canonicalizes them b/c new lines are added during parsing.
 	eh, errors := errorHandler()
-	desc := ast.ParseGlob(filepath.Join(filepath.Dir(cfg.autoFile), "*.txt"), eh)
+	desc := ast.ParseGlob(filepath.Join(filepath.Dir(autoFile), "*.txt"), eh)
 	if desc == nil {
 		return nil, fmt.Errorf("failed to parse descriptions\n%s", errors.Bytes())
 	}
@@ -109,8 +91,8 @@ func run(cfg *config) (*declextract.Result, error) {
 	if consts == nil {
 		return nil, fmt.Errorf("failed to typecheck descriptions: %w\n%s", err, errors.Bytes())
 	}
-	finishInterfaces(res.Interfaces, consts, cfg.autoFile)
-	if err := osutil.WriteFile(cfg.autoFile+".info", serialize(res.Interfaces)); err != nil {
+	finishInterfaces(res.Interfaces, consts, autoFile)
+	if err := osutil.WriteFile(autoFile+".info", serialize(res.Interfaces)); err != nil {
 		return nil, err
 	}
 	removeUnused(desc, "", unusedNodes)
@@ -120,10 +102,10 @@ func run(cfg *config) (*declextract.Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to typecheck descriptions: %w\n%s", err, errors.Bytes())
 	}
-	removeUnused(desc, cfg.autoFile, unusedConsts)
+	removeUnused(desc, autoFile, unusedConsts)
 	// We need re-parse them again b/c new lines are fixed up during parsing.
-	formatted := ast.Format(ast.Parse(ast.Format(desc), cfg.autoFile, nil))
-	if err := osutil.WriteFile(cfg.autoFile, formatted); err != nil {
+	formatted := ast.Format(ast.Parse(ast.Format(desc), autoFile, nil))
+	if err := osutil.WriteFile(autoFile, formatted); err != nil {
 		return nil, err
 	}
 	return res, nil
@@ -141,17 +123,13 @@ func removeUnused(desc *ast.Description, autoFile string, unusedNodes []ast.Node
 	})
 }
 
-func prepare(cfg *config) (*declextract.Output, *ifaceprobe.Info, []*cover.FileCoverage,
-	map[string][]string, error) {
-	arches, err := tool.ParseArchList(target.OS, cfg.archList)
-	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("failed to parse arches flag: %w", err)
-	}
+func prepare(loadProbeInfo func() (*ifaceprobe.Info, error), cfg *clangtool.Config) (
+	*declextract.Output, *ifaceprobe.Info, map[string][]string, error) {
 	var eg errgroup.Group
 	var out *declextract.Output
 	eg.Go(func() error {
 		var err error
-		out, err = clangtool.Run(cfg.Config)
+		out, err = clangtool.Run(cfg)
 		if err != nil {
 			return err
 		}
@@ -160,7 +138,7 @@ func prepare(cfg *config) (*declextract.Output, *ifaceprobe.Info, []*cover.FileC
 	var probeInfo *ifaceprobe.Info
 	eg.Go(func() error {
 		var err error
-		probeInfo, err = cfg.loadProbeInfo()
+		probeInfo, err = loadProbeInfo()
 		if err != nil {
 			return fmt.Errorf("kernel probing failed: %w", err)
 		}
@@ -169,44 +147,14 @@ func prepare(cfg *config) (*declextract.Output, *ifaceprobe.Info, []*cover.FileC
 	var syscallRename map[string][]string
 	eg.Go(func() error {
 		var err error
-		syscallRename, err = buildSyscallRenameMap(cfg.KernelSrc, arches)
+		syscallRename, err = buildSyscallRenameMap(cfg.KernelSrc)
 		if err != nil {
 			return fmt.Errorf("failed to build syscall rename map: %w", err)
 		}
 		return nil
 	})
-	var coverage []*cover.FileCoverage
-	eg.Go(func() error {
-		if cfg.coverFile == "" {
-			return nil
-		}
-		var err error
-		coverage, err = loadCoverage(cfg.coverFile)
-		return err
-	})
-	err = eg.Wait()
-	return out, probeInfo, coverage, syscallRename, err
-}
-
-func loadCoverage(fileName string) ([]*cover.FileCoverage, error) {
-	f, err := os.Open(fileName)
-	if err != nil {
-		return nil, err
-	}
-	dec := json.NewDecoder(f)
-	dec.DisallowUnknownFields()
-	var coverage []*cover.FileCoverage
-	for {
-		elem := new(cover.FileCoverage)
-		if err := dec.Decode(elem); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, err
-		}
-		coverage = append(coverage, elem)
-	}
-	return coverage, nil
+	err := eg.Wait()
+	return out, probeInfo, syscallRename, err
 }
 
 func probe(cfg *mgrconfig.Config, cfgFile string) (*ifaceprobe.Info, error) {
@@ -249,10 +197,9 @@ func errorHandler() (func(pos ast.Pos, msg string), *bytes.Buffer) {
 func serialize(interfaces []*declextract.Interface) []byte {
 	w := new(bytes.Buffer)
 	for _, iface := range interfaces {
-		fmt.Fprintf(w, "%v\t%v\tfunc:%v\tloc:%v\tcoverage:%v\taccess:%v\tmanual_desc:%v\tauto_desc:%v",
-			iface.Type, iface.Name, iface.Func, iface.ReachableLOC,
-			cover.Percent(iface.CoveredBlocks, iface.TotalBlocks),
-			iface.Access, iface.ManualDescriptions, iface.AutoDescriptions)
+		fmt.Fprintf(w, "%v\t%v\tfunc:%v\tloc:%v\taccess:%v\tmanual_desc:%v\tauto_desc:%v",
+			iface.Type, iface.Name, iface.Func, iface.ReachableLOC, iface.Access,
+			iface.ManualDescriptions, iface.AutoDescriptions)
 		for _, file := range iface.Files {
 			fmt.Fprintf(w, "\tfile:%v", file)
 		}
@@ -275,9 +222,7 @@ func finishInterfaces(interfaces []*declextract.Interface, consts map[string]*co
 	}
 	extractor := subsystem.MakeExtractor(subsystem.GetList(target.OS))
 	for _, iface := range interfaces {
-		if iface.IdentifyingConst != "" {
-			iface.ManualDescriptions = declextract.Tristate(manual[iface.IdentifyingConst])
-		}
+		iface.ManualDescriptions = manual[iface.IdentifyingConst]
 		var crashes []*subsystem.Crash
 		for _, file := range iface.Files {
 			crashes = append(crashes, &subsystem.Crash{GuiltyPath: file})
@@ -289,7 +234,7 @@ func finishInterfaces(interfaces []*declextract.Interface, consts map[string]*co
 	}
 }
 
-func buildSyscallRenameMap(sourceDir string, arches []string) (map[string][]string, error) {
+func buildSyscallRenameMap(sourceDir string) (map[string][]string, error) {
 	// Some syscalls have different names and entry points and thus need to be renamed.
 	// e.g. SYSCALL_DEFINE1(setuid16, old_uid_t, uid) is referred to in the .tbl file with setuid.
 	// Parse *.tbl files that map functions defined with SYSCALL_DEFINE macros to actual syscall names.
@@ -299,7 +244,7 @@ func buildSyscallRenameMap(sourceDir string, arches []string) (map[string][]stri
 	// and then just order arches by name to have deterministic result.
 	// Note: some syscalls may have no record in the tables for the architectures we support.
 	syscalls := make(map[string][]tblSyscall)
-	tblFiles, err := findTblFiles(sourceDir, arches)
+	tblFiles, err := findTblFiles(sourceDir)
 	if err != nil {
 		return nil, err
 	}
@@ -375,10 +320,9 @@ func parseTblFile(data []byte, arch string, syscalls map[string][]tblSyscall) {
 	}
 }
 
-func findTblFiles(sourceDir string, arches []string) (map[string][]string, error) {
+func findTblFiles(sourceDir string) (map[string][]string, error) {
 	files := make(map[string][]string)
-	for _, name := range arches {
-		arch := targets.List[target.OS][name]
+	for _, arch := range targets.List[target.OS] {
 		err := filepath.WalkDir(filepath.Join(sourceDir, "arch", arch.KernelHeaderArch),
 			func(file string, d fs.DirEntry, err error) error {
 				if err == nil && strings.HasSuffix(file, ".tbl") {

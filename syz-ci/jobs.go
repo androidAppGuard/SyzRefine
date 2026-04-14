@@ -5,7 +5,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -62,16 +61,24 @@ func newJobManager(cfg *Config, managers []*Manager, shutdownPending chan struct
 	}, nil
 }
 
-// startLoop starts a job loop in parallel.
-func (jm *JobManager) startLoop(ctx context.Context, wg *sync.WaitGroup) {
+// startLoop starts a job loop in parallel and returns a blocking function
+// to gracefully stop job processing.
+func (jm *JobManager) startLoop(wg *sync.WaitGroup) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{}, 1)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		jm.loop(ctx)
+		jm.loop(stop)
+		done <- struct{}{}
 	}()
+	return func() {
+		close(stop)
+		<-done
+	}
 }
 
-func (jm *JobManager) loop(ctx context.Context) {
+func (jm *JobManager) loop(stop chan struct{}) {
 	if err := jm.resetJobs(); err != nil {
 		if jm.dash != nil {
 			jm.dash.LogError("syz-ci", "reset jobs failed: %v", err)
@@ -102,7 +109,7 @@ func (jm *JobManager) loop(ctx context.Context) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			jp.loop(ctx)
+			jp.loop(stop)
 		}()
 		if !main || !jm.needParallelProcessor() {
 			break
@@ -136,14 +143,14 @@ func (jm *JobManager) resetJobs() error {
 	return nil
 }
 
-func (jp *JobProcessor) loop(ctx context.Context) {
+func (jp *JobProcessor) loop(stop chan struct{}) {
 	jp.Logf(0, "job loop started")
 loop:
 	for {
 		// Check jp.stop separately first, otherwise if stop signal arrives during a job execution,
 		// we can still grab the next job with 50% probability.
 		select {
-		case <-ctx.Done():
+		case <-stop:
 			break loop
 		default:
 		}
@@ -159,7 +166,7 @@ loop:
 			jp.pollJobs()
 		case <-jp.commitTicker:
 			jp.pollCommits()
-		case <-ctx.Done():
+		case <-stop:
 			break loop
 		}
 	}
@@ -461,7 +468,7 @@ func (jp *JobProcessor) bisect(job *Job, mgrcfg *mgrconfig.Config) error {
 	cfg := &bisect.Config{
 		Trace: &debugtracer.GenericTracer{
 			TraceWriter: io.MultiWriter(trace, log.VerboseWriter(3)),
-			OutDir:      osutil.Abs(filepath.Join("jobs", "debug", strings.ReplaceAll(req.ID, "|", "_"))),
+			OutDir:      osutil.Abs(filepath.Join("jobs", "debug", strings.Replace(req.ID, "|", "_", -1))),
 		},
 		// Out of 1049 cause bisections that we have now:
 		// -  891 finished under  6h (84.9%)
@@ -641,9 +648,9 @@ func (jp *JobProcessor) testPatch(job *Job, mgrcfg *mgrconfig.Config) error {
 	// Testing of patches for these bugs fail now because of the config, so we disable it as a work-around.
 	// Ideally we have a new pahole and then we can remove this hack. That's issue #2096.
 	// pkg/vcs/linux.go also disables it for the bisection process.
-	req.KernelConfig = bytes.ReplaceAll(req.KernelConfig,
+	req.KernelConfig = bytes.Replace(req.KernelConfig,
 		[]byte("CONFIG_DEBUG_INFO_BTF=y"),
-		[]byte("# CONFIG_DEBUG_INFO_BTF is not set"))
+		[]byte("# CONFIG_DEBUG_INFO_BTF is not set"), -1)
 
 	log.Logf(0, "job: building kernel...")
 	kernelConfig, details, err := env.BuildKernel(buildCfg)

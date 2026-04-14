@@ -128,7 +128,7 @@ var testConfig = &GlobalConfig{
 				},
 			},
 			Subsystems: SubsystemsConfig{
-				Service: subsystem.MustMakeService(testSubsystems, 0),
+				Service: subsystem.MustMakeService(testSubsystems),
 			},
 		},
 		"test2": {
@@ -326,7 +326,7 @@ var testConfig = &GlobalConfig{
 			},
 			RetestRepros: true,
 			Subsystems: SubsystemsConfig{
-				Service: subsystem.MustMakeService(testSubsystems, 0),
+				Service: subsystem.MustMakeService(testSubsystems),
 				Redirect: map[string]string{
 					"oldSubsystem": "subsystemA",
 				},
@@ -517,7 +517,7 @@ var testConfig = &GlobalConfig{
 				},
 			},
 			Subsystems: SubsystemsConfig{
-				Service: subsystem.MustMakeService(testSubsystems, 0),
+				Service: subsystem.MustMakeService(testSubsystems),
 				Reminder: &BugListReportingConfig{
 					SourceReporting: "public",
 					BugsInReport:    6,
@@ -578,31 +578,6 @@ var testConfig = &GlobalConfig{
 			},
 			FindBugOriginTrees:     true,
 			RetestMissingBackports: true,
-		},
-		"coverage-tests": {
-			Coverage: &CoverageConfig{
-				EmailRegressionsTo:  "test@test.test",
-				RegressionThreshold: 1,
-			},
-			AccessLevel: AccessPublic,
-			Key:         "coveragetestskeycoveragetestskeycoveragetestskey",
-			Repos: []KernelRepo{
-				{
-					URL:    "git://syzkaller.org/test.git",
-					Branch: "main",
-					Alias:  "main",
-				},
-			},
-			Reporting: []Reporting{
-				{
-					Name:       "non-public",
-					DailyLimit: 1000,
-					Filter: func(bug *Bug) FilterResult {
-						return FilterReport
-					},
-					Config: &TestConfig{Index: 1},
-				},
-			},
 		},
 	},
 }

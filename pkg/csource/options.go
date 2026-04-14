@@ -50,9 +50,6 @@ type Options struct {
 	HandleSegv bool `json:"segv,omitempty"`
 
 	Trace bool `json:"trace,omitempty"`
-
-	CallComments bool `json:"callcomments,omitempty"`
-
 	LegacyOptions
 }
 
@@ -128,11 +125,11 @@ func (opts Options) checkLinuxOnly(OS string) error {
 	if OS == targets.Linux {
 		return nil
 	}
-	if opts.NetInjection && OS != targets.OpenBSD && OS != targets.FreeBSD && OS != targets.NetBSD {
+	if opts.NetInjection && !(OS == targets.OpenBSD || OS == targets.FreeBSD || OS == targets.NetBSD) {
 		return fmt.Errorf("option NetInjection is not supported on %v", OS)
 	}
 	if opts.Sandbox == sandboxNamespace ||
-		(opts.Sandbox == sandboxSetuid && OS != targets.OpenBSD && OS != targets.FreeBSD && OS != targets.NetBSD) ||
+		(opts.Sandbox == sandboxSetuid && !(OS == targets.OpenBSD || OS == targets.FreeBSD || OS == targets.NetBSD)) ||
 		opts.Sandbox == sandboxAndroid {
 		return fmt.Errorf("option Sandbox=%v is not supported on %v", opts.Sandbox, OS)
 	}
@@ -163,14 +160,13 @@ func (opts Options) checkLinuxOnly(OS string) error {
 
 func DefaultOpts(cfg *mgrconfig.Config) Options {
 	opts := Options{
-		Threaded:     true,
-		Repeat:       true,
-		Procs:        cfg.Procs,
-		Slowdown:     cfg.Timeouts.Slowdown,
-		Sandbox:      cfg.Sandbox,
-		UseTmpDir:    true,
-		HandleSegv:   true,
-		CallComments: true,
+		Threaded:   true,
+		Repeat:     true,
+		Procs:      cfg.Procs,
+		Slowdown:   cfg.Timeouts.Slowdown,
+		Sandbox:    cfg.Sandbox,
+		UseTmpDir:  true,
+		HandleSegv: true,
 	}
 	if cfg.TargetOS == targets.Linux {
 		opts.NetInjection = true
@@ -252,7 +248,7 @@ func deserializeLegacyOptions(data string, opts *Options) (int, error) {
 
 // Support for legacy formats.
 func deserializeLegacyFormats(data []byte, opts *Options) error {
-	data = bytes.ReplaceAll(data, []byte("Sandbox: "), []byte("Sandbox:empty "))
+	data = bytes.Replace(data, []byte("Sandbox: "), []byte("Sandbox:empty "), -1)
 	strData := string(data)
 
 	// We can distinguish between legacy formats by the number

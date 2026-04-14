@@ -5,8 +5,10 @@ package fuzzer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand"
+	"os"
 	"runtime"
 	"sort"
 	"sync"
@@ -16,6 +18,7 @@ import (
 	"github.com/google/syzkaller/pkg/csource"
 	"github.com/google/syzkaller/pkg/flatrpc"
 	"github.com/google/syzkaller/pkg/fuzzer/queue"
+	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/signal"
 	"github.com/google/syzkaller/pkg/stat"
@@ -63,6 +66,9 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 		// regenerating the table, we don't want to repeat it right away.
 		ctRegenerate: make(chan struct{}),
 	}
+	// Annotation: the fuzzing Queue
+	// Annotation: this queue contains triageCandidateQueue/candidateQueue/triageQueue/smashQueue
+	// Annotation: create 4 global queue (triageCandidateQueue/candidateQueue/triageQueue/smashQueue), each job will hold it to submit task (it is called by fuzzer.execute(/ Submit())
 	f.execQueues = newExecQueues(f)
 	f.updateChoiceTable(nil)
 	go f.choiceTableUpdater()
@@ -70,13 +76,6 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 		go f.logCurrentStats()
 	}
 	return f
-}
-
-func (fuzzer *Fuzzer) RecommendedCalls() int {
-	if fuzzer.Config.ModeKFuzzTest {
-		return prog.RecommendedCallsKFuzzTest
-	}
-	return prog.RecommendedCalls
 }
 
 type execQueues struct {
@@ -103,6 +102,7 @@ func newExecQueues(fuzzer *Fuzzer) execQueues {
 		skipQueue = 2
 	}
 	// Sources are listed in the order, in which they will be polled.
+	// Annation: when the source arrty is empty, it will call fuzzer.genFuzz to generate jobs
 	ret.source = queue.Order(
 		ret.triageCandidateQueue,
 		ret.candidateQueue,
@@ -113,12 +113,8 @@ func newExecQueues(fuzzer *Fuzzer) execQueues {
 	return ret
 }
 
-func (fuzzer *Fuzzer) CandidatesToTriage() int {
-	return fuzzer.statCandidates.Val() + fuzzer.statJobsTriageCandidate.Val()
-}
-
 func (fuzzer *Fuzzer) CandidateTriageFinished() bool {
-	return fuzzer.CandidatesToTriage() == 0
+	return fuzzer.statCandidates.Val()+fuzzer.statJobsTriageCandidate.Val() == 0
 }
 
 func (fuzzer *Fuzzer) execute(executor queue.Executor, req *queue.Request) *queue.Result {
@@ -137,22 +133,37 @@ func (fuzzer *Fuzzer) prepare(req *queue.Request, flags ProgFlags, attempt int) 
 }
 
 func (fuzzer *Fuzzer) enqueue(executor queue.Executor, req *queue.Request, flags ProgFlags, attempt int) {
+	// Annotation: set callback function to execute after executing this job
 	fuzzer.prepare(req, flags, attempt)
 	executor.Submit(req)
 }
 
+// Annotation: put all new signal calls as a triageJob and startJob (this job contains mutiply new-signal calls)
 func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags ProgFlags, attempt int) bool {
 
 	// Instrumentation
 	if res.Info != nil {
+		validCount := 0
 		for i := range res.Info.Calls {
 			req.Prog.Calls[i].Errno = res.Info.Calls[i].Error
-			// CallExecuteCountMap catpture the call that syzkaller can not validly generate
-			isTriggerLLMGeneration := fuzzer.target.CallCorpus.UpdateCallExecuteCount(req.Prog.Calls[i].Meta.Name, req.Prog.Calls[i].Errno == 0)
-			if isTriggerLLMGeneration {
-				// GenerationCallOperator(req.Prog.Calls[i].Meta, fuzzer)
+			if _, ok := fuzzer.target.PriorityQueue[req.Prog.Calls[i].Meta.ID]; !ok {
+				log.Logf(0, "impossible case, call Id (%v) of processResult not in PriorityQueue\n", req.Prog.Calls[i].Meta.Name)
 			}
+			if res.Info.Calls[i].Error == 0 {
+				validCount++
+			}
+			// CallExecuteCountMap catpture the call that syzkaller can not validly generate
+			// isTriggerLLMGeneration := fuzzer.target.CallCorpus.UpdateCallExecuteCount(req.Prog.Calls[i].Meta.Name, req.Prog.Calls[i].Errno == 0)
+			// if isTriggerLLMGeneration {
+			// 	// GenerationCallOperator(req.Prog.Calls[i].Meta, fuzzer)
+			// }
 		}
+
+		if req.Stat == fuzzer.statExecGenerate || req.Stat == fuzzer.statExecFuzz || req.Stat == fuzzer.statExecCandidate || req.Stat == fuzzer.statExecSmash || req.Stat == fuzzer.statExecHint || req.Stat == fuzzer.statExecSeed {
+			fuzzer.statRecordExecCount.Add(len(req.Prog.Calls))
+			fuzzer.statRecordExecValidCount.Add(validCount)
+		}
+
 		switch req.OperationType {
 		case LLMRepairModel:
 			if req.OperationCallIndex != -1 && res.Info.Calls[req.OperationCallIndex].Error == 0 {
@@ -173,6 +184,7 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 	// it may result it concurrent modification of req.Prog.
 	var triage map[int]*triageCall
 	if req.ExecOpts.ExecFlags&flatrpc.ExecFlagCollectSignal > 0 && res.Info != nil && !dontTriage {
+		// Annotation: each new-signal call is save in triage (map[int]*triageCall)
 		for call, info := range res.Info.Calls {
 			fuzzer.triageProgCall(req.Prog, info, call, &triage)
 		}
@@ -199,6 +211,15 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 			}
 			sort.Strings(job.info.Calls)
 			fuzzer.startJob(stat, job)
+
+			// Instrumention
+			if req.OperationType == LLMRepairModel || req.OperationType == LLMGenerateModel {
+				keys := make([]int, 0, len(triage))
+				for k := range triage {
+					keys = append(keys, k)
+				}
+				log.Logf(0, "Trgger new coverage:%v\n**LLM generated program**:\n%s\n**Prompt**\n%s\n", keys, req.Prog.Serialize(), req.Prompt)
+			}
 		}
 	}
 
@@ -244,7 +265,6 @@ type Config struct {
 	FetchRawCover  bool
 	NewInputFilter func(call string) bool
 	PatchTest      bool
-	ModeKFuzzTest  bool
 }
 
 func (fuzzer *Fuzzer) triageProgCall(p *prog.Prog, info *flatrpc.CallInfo, call int, triage *map[int]*triageCall) {
@@ -281,10 +301,8 @@ func (fuzzer *Fuzzer) handleCallInfo(req *queue.Request, info *flatrpc.CallInfo,
 	stat := &fuzzer.Syscalls[syscallIdx]
 	if req.ExecOpts.ExecFlags&flatrpc.ExecFlagCollectComps != 0 {
 		stat.CompsOverflows.Add(1)
-		fuzzer.statCompsOverflows.Add(1)
 	} else {
 		stat.CoverOverflows.Add(1)
-		fuzzer.statCoverOverflows.Add(1)
 	}
 }
 
@@ -327,6 +345,9 @@ func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 	return req
 }
 
+// Annotation: called by /data/ghui/phd2/experiment_code/syzkaller_new/pkg/fuzzer/job.go
+// func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags ProgFlags, attempt int) bool { => trigger job create new job if new cov
+// func (job *triageJob) handleCall(call int, info *triageCall) {
 func (fuzzer *Fuzzer) startJob(stat *stat.Val, newJob job) {
 	fuzzer.Logf(2, "started %T", newJob)
 	go func() {
@@ -510,4 +531,23 @@ func DefaultExecOpts(cfg *mgrconfig.Config, features flatrpc.Feature, debug bool
 		ExecFlags:  exec,
 		SandboxArg: cfg.SandboxArg,
 	}
+}
+
+// Instrumentation
+func saveArrayToFile(filename string, originalProg []byte, originalProgErrnos []int32, prog []byte, progErrnos []int32) error {
+	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	file.Write(originalProg)
+	jsonData, err := json.Marshal(originalProgErrnos)
+	file.Write(append(jsonData, '\n'))
+
+	file.Write(prog)
+	jsonData, err = json.Marshal(progErrnos)
+	file.Write(append(jsonData, '\n', '\n'))
+
+	return nil
 }

@@ -9,20 +9,22 @@ import (
 
 type Service struct {
 	*Extractor
-	Revision  int
 	perName   map[string]*Subsystem
 	perParent map[*Subsystem][]*Subsystem
 }
 
-func MustMakeService(list []*Subsystem, revision int) *Service {
-	service, err := MakeService(list, revision)
+func MustMakeService(list []*Subsystem) *Service {
+	if len(list) == 0 {
+		panic("the subsystem list is empty")
+	}
+	service, err := MakeService(list)
 	if err != nil {
 		panic(fmt.Sprintf("service creation failed: %s", err))
 	}
 	return service
 }
 
-func MakeService(list []*Subsystem, revision int) (*Service, error) {
+func MakeService(list []*Subsystem) (*Service, error) {
 	extractor := MakeExtractor(list)
 	perName := map[string]*Subsystem{}
 	perParent := map[*Subsystem][]*Subsystem{}
@@ -40,7 +42,6 @@ func MakeService(list []*Subsystem, revision int) (*Service, error) {
 	}
 	return &Service{
 		Extractor: extractor,
-		Revision:  revision,
 		perName:   perName,
 		perParent: perParent,
 	}, nil

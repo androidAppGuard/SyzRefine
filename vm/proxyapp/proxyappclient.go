@@ -154,7 +154,7 @@ func (p *pool) Count() int {
 	return p.count
 }
 
-func (p *pool) Create(_ context.Context, workdir string, index int) (vmimpl.Instance, error) {
+func (p *pool) Create(workdir string, index int) (vmimpl.Instance, error) {
 	p.mu.Lock()
 	proxy := p.proxy
 	p.mu.Unlock()
@@ -335,7 +335,7 @@ func (proxy *ProxyApp) doLogPooling(writer io.Writer) {
 					return
 				}
 				if log.V(reply.Verbosity) {
-					fmt.Fprintf(writer, "ProxyAppLog: %v", reply.Log)
+					writer.Write([]byte(fmt.Sprintf("ProxyAppLog: %v", reply.Log)))
 				}
 			}
 		}
@@ -477,7 +477,11 @@ func buildMerger(names ...string) (*vmimpl.OutputMerger, []io.Writer) {
 	return merger, wPipes
 }
 
-func (inst *instance) Run(ctx context.Context, command string) (<-chan []byte, <-chan error, error) {
+func (inst *instance) Run(
+	timeout time.Duration,
+	stop <-chan bool,
+	command string,
+) (<-chan []byte, <-chan error, error) {
 	merger, wPipes := buildMerger("stdout", "stderr", "console")
 	receivedStdoutChunks := wPipes[0]
 	receivedStderrChunks := wPipes[1]
@@ -498,6 +502,7 @@ func (inst *instance) Run(ctx context.Context, command string) (<-chan []byte, <
 
 	runID := reply.RunID
 	terminationError := make(chan error, 1)
+	timeoutSignal := time.After(timeout)
 	signalClientErrorf := clientErrorf(receivedStderrChunks)
 
 	go func() {
@@ -526,8 +531,11 @@ func (inst *instance) Run(ctx context.Context, command string) (<-chan []byte, <
 				} else {
 					continue
 				}
-			case <-ctx.Done():
+			case <-timeoutSignal:
 				// It is the happy path.
+				inst.runStop(runID)
+				terminationError <- vmimpl.ErrTimeout
+			case <-stop:
 				inst.runStop(runID)
 				terminationError <- vmimpl.ErrTimeout
 			}
@@ -591,7 +599,7 @@ type stdInOutCloser struct {
 
 func clientErrorf(writer io.Writer) func(fmt string, s ...interface{}) {
 	return func(f string, s ...interface{}) {
-		fmt.Fprintf(writer, f, s...)
+		writer.Write([]byte(fmt.Sprintf(f, s...)))
 		writer.Write([]byte("\nSYZFAIL: proxy app plugin error\n"))
 	}
 }

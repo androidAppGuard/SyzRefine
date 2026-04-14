@@ -11,7 +11,7 @@ RUN go mod download
 COPY --exclude=syz-cluster . .
 RUN make TARGETARCH=amd64
 
-FROM golang:1.24-alpine AS boot-step-builder
+FROM golang:1.23-alpine AS boot-step-builder
 WORKDIR /build
 
 # Copy the code and the dependencies.
@@ -39,5 +39,6 @@ RUN useradd --create-home syzkaller
 
 COPY --from=syzkaller-builder /build/bin/ /syzkaller/bin/
 COPY --from=boot-step-builder /bin/boot-step /bin/boot-step
+COPY syz-cluster/workflow/configs/ /configs/
 
 ENTRYPOINT ["/bin/boot-step"]

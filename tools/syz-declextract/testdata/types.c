@@ -2,7 +2,6 @@
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 #include "include/syscall.h"
-#include "include/types.h"
 
 typedef struct { float f; } anon_t;
 struct empty_struct {};
@@ -43,7 +42,7 @@ struct packed_t {
 struct various {
 	struct various* recursive;
 	struct recursive* next;
-	struct packed_t packed;
+	struct packed_t packed;	
 };
 
 struct recursive {
@@ -51,22 +50,7 @@ struct recursive {
 };
 
 SYSCALL_DEFINE1(types_syscall, struct anon_struct* p, struct empty_struct* y,
-	struct bitfields* b, int pid, fd_t f, struct various __user* v,
-	int __user* pi, u32 __user* pu) {
-	return 0;
-}
-
-enum enum_foo {
-	enum_foo_a,
-	enum_foo_b,
-};
-
-typedef const enum {
-	enum_bar_a,
-	enum_bar_b,
-} enum_bar;
-
-SYSCALL_DEFINE1(types_syscall2, const enum enum_foo foo, const enum_bar bar) {
+	struct bitfields* b, int pid, fd_t f, struct various* v) {
 	return 0;
 }
 

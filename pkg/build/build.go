@@ -156,14 +156,13 @@ type builder interface {
 
 func getBuilder(targetOS, targetArch, vmType string) (builder, error) {
 	if targetOS == targets.Linux {
-		switch vmType {
-		case targets.GVisor:
+		if vmType == targets.GVisor {
 			return gvisor{}, nil
-		case "cuttlefish":
+		} else if vmType == "cuttlefish" {
 			return cuttlefish{}, nil
-		case "proxyapp:android":
+		} else if vmType == "proxyapp:android" {
 			return android{}, nil
-		case targets.Starnix:
+		} else if vmType == targets.Starnix {
 			return starnix{}, nil
 		}
 	}
@@ -192,7 +191,7 @@ func compilerIdentity(compiler string) (string, error) {
 	arg, timeout := "--version", time.Minute
 	if bazel {
 		// Bazel episodically fails with 1 min timeout.
-		timeout = 10 * time.Minute
+		arg, timeout = "", 10*time.Minute
 	}
 	output, err := osutil.RunCmd(timeout, "", compiler, arg)
 	if err != nil {
@@ -208,9 +207,6 @@ func compilerIdentity(compiler string) (string, error) {
 				continue
 			}
 			if strings.HasPrefix(line, "WARNING: ") {
-				continue
-			}
-			if strings.Contains(line, "Downloading https://releases.bazel") {
 				continue
 			}
 		}
@@ -270,7 +266,7 @@ func extractCauseInner(s []byte, kernelSrc string) ([]byte, string) {
 	file := ""
 	for i := range lines {
 		if stripPrefix != nil {
-			lines[i] = bytes.ReplaceAll(lines[i], stripPrefix, nil)
+			lines[i] = bytes.Replace(lines[i], stripPrefix, nil, -1)
 		}
 		if file == "" {
 			for _, fileRe := range fileRes {
@@ -296,8 +292,8 @@ func extractCauseInner(s []byte, kernelSrc string) ([]byte, string) {
 	res := bytes.Join(lines, []byte{'\n'})
 	// gcc uses these weird quotes around identifiers, which may be
 	// mis-rendered by systems that don't understand utf-8.
-	res = bytes.ReplaceAll(res, []byte("‘"), []byte{'\''})
-	res = bytes.ReplaceAll(res, []byte("’"), []byte{'\''})
+	res = bytes.Replace(res, []byte("‘"), []byte{'\''}, -1)
+	res = bytes.Replace(res, []byte("’"), []byte{'\''}, -1)
 	return res, file
 }
 
@@ -345,7 +341,6 @@ var buildFailureCauses = [...]buildFailureCause{
 	{pattern: regexp.MustCompile(`FAILED unresolved symbol`)},
 	{pattern: regexp.MustCompile(`No rule to make target`)},
 	{pattern: regexp.MustCompile(`^Killed$`)},
-	{pattern: regexp.MustCompile(`error\[.*?\]: `)},
 	{weak: true, pattern: regexp.MustCompile(`: not found`)},
 	{weak: true, pattern: regexp.MustCompile(`: final link failed: `)},
 	{weak: true, pattern: regexp.MustCompile(`collect2: error: `)},

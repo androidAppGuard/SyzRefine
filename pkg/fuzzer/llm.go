@@ -14,8 +14,6 @@ import (
 
 const (
 
-	apiURL = "fill your apiUrl"
-	apiToken = "fill your api token"
 )
 
 type ChatRequest struct {
@@ -36,13 +34,14 @@ type ChatResponse struct {
 	} `json:"choices"`
 }
 
-func CallDeepseekAPI(prompt_user string, messages []Message) string {
+func CallDeepseekAPI(prompt_user string, messages []Message, llmurl string, llmmodel string, llmtoken string) string {
 	// 1. create request
 	request := ChatRequest{
-		Model: "gpt-4o-mini-ca",
+		Model: llmmodel,
+		// Model: "gpt-4o-mini-ca",
 		// Model: "gpt-5-mini-ca",
-		// Model:    "claude-3-5-haiku-20241022",
-		// Model:    "gemini-2.5-flash",
+		// Model: "gpt-5-nano-ca",
+		// Model:    "gemini-2.5-flash-lite",
 		Messages: []Message{},
 	}
 	if messages != nil || len(messages) > 0 {
@@ -57,7 +56,7 @@ func CallDeepseekAPI(prompt_user string, messages []Message) string {
 		return ""
 	}
 
-	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(requestBody))
+	req, err := http.NewRequest("POST", llmurl, bytes.NewBuffer(requestBody))
 	if err != nil {
 		log.Logf(0, "Create request failed: %v", err)
 		return ""
@@ -65,7 +64,7 @@ func CallDeepseekAPI(prompt_user string, messages []Message) string {
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiToken)
+	req.Header.Set("Authorization", "Bearer "+llmtoken)
 	req.Header.Set("max_tokens", "4096")
 
 	//3. send request
@@ -157,7 +156,11 @@ func extractCallSequence(content string, SyscallMap map[string]*prog.Syscall) []
 				}
 			}
 		}
-		match = codeBlocks[len(codeBlocks)-1] // Return the last code block
+		if len(codeBlocks) > 0 {
+			match = codeBlocks[len(codeBlocks)-1] // Return the last code block
+		} else {
+			return callSequence
+		}
 	}
 	lines := strings.Split(match, "\n")
 	for _, line := range lines {

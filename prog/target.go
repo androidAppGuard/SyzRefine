@@ -83,7 +83,227 @@ type Target struct {
 	defaultChoiceTable *ChoiceTable
 
 	// Instrumentation
-	CallCorpus *CallCorpus
+	CallCorpus                      *CallCorpus
+	PriorityQueue                   map[int]*QueueElement
+	globalInterestingInvalidProgs   int
+	globalInterestingInvalidProgsMu sync.RWMutex
+	globalInterestingValidCount     int
+	globalInterestingValidCountMu   sync.RWMutex
+	globalLLMBudget                 int
+	globalLLMBudgetMu               sync.RWMutex
+
+	LLMMODE  string
+	LLMURL   string
+	LLMTOKEN string
+}
+
+type QueueElement struct {
+	Id                      int // SystemCall Id
+	MetaCall                *Syscall
+	Priority                float64
+	InterestingInvalidProgs []*Prog
+	InterestingValidCount   int
+	UsedBudget              int
+	qeueueElementMu         sync.RWMutex
+
+	Target *Target
+}
+
+func (qE *QueueElement) UpdatePriority(callCorpus *CallCorpus, time int) {
+	qE.qeueueElementMu.Lock()
+	defer qE.qeueueElementMu.Unlock()
+
+	// valid setting
+	contextProperty := 0.0
+	if qE.MetaCall.Attrs.Disabled {
+		qE.Priority = 0
+		return
+	}
+	// 1) invalid interesting property
+	selfInterestingInvalidProgs := len(qE.InterestingInvalidProgs)
+	if selfInterestingInvalidProgs == 0 {
+		contextProperty += 0
+	} else {
+		contextProperty += float64(selfInterestingInvalidProgs) * 2
+	}
+
+	// 2) valid interesting property
+	if time%300 == 0 {
+		if _, ok := callCorpus.ValidProgsMap[qE.MetaCall.Name]; !ok {
+			if qE.UsedBudget <= 5 { // 3) used budget property
+				contextProperty += 1
+			}
+		} else {
+			contextProperty += 0
+		}
+	}
+	qE.Priority = contextProperty
+
+	// // translation
+	// if qE.MetaCall.Attrs.Disabled {
+	// 	qE.Priority = 0
+	// 	return
+	// }
+	// contextProperty := 0.0
+	// // 1) invalid interesting property
+	// selfInterestingInvalidProgs := len(qE.InterestingInvalidProgs)
+	// if selfInterestingInvalidProgs == 0 {
+	// 	contextProperty = 0
+	// } else {
+	// 	contextProperty = 25 * float64(selfInterestingInvalidProgs)
+	// }
+	// // 2) invalid interesting property
+	// if _, ok := callCorpus.ValidProgsMap[qE.MetaCall.Name]; !ok {
+	// 	contextProperty = contextProperty * 2
+	// } else {
+	// 	contextProperty = contextProperty / float64(qE.InterestingValidCount)
+	// }
+	// // 3) used budget property
+	// selfLLMBudget := qE.UsedBudget
+	// if selfLLMBudget == 0 {
+	// 	contextProperty *= 2
+	// } else if selfLLMBudget == 1 {
+	// 	contextProperty *= 1.75
+	// } else if selfLLMBudget == 2 {
+	// 	contextProperty *= 1.5
+	// } else if selfLLMBudget == 3 {
+	// 	contextProperty *= 1.25
+	// } else if selfLLMBudget == 4 {
+	// 	contextProperty *= 1
+	// } else if selfLLMBudget == 5 {
+	// 	contextProperty *= 0.75
+	// } else if selfLLMBudget > 5 {
+	// 	contextProperty = 0
+	// }
+	// qE.Priority = contextProperty
+
+	// // like afl
+	// contextProperty := InitPriority
+	// // 1) valid interesting property
+	// globalInterestingValidCount := float64(qE.Target.GetGlobalInterestingValidCount())
+	// callsCount := float64(len(qE.Target.PriorityQueue))
+	// avgInterestingValidCount := globalInterestingValidCount / callsCount
+	// selfInterestingValidCount := float64(qE.InterestingValidCount)
+	// if selfInterestingValidCount == 0 {
+	// 	contextProperty = 200
+	// } else if selfInterestingValidCount*4 <= avgInterestingValidCount {
+	// 	contextProperty = 175
+	// } else if selfInterestingValidCount*3 <= avgInterestingValidCount {
+	// 	contextProperty = 150
+	// } else if selfInterestingValidCount*2 <= avgInterestingValidCount {
+	// 	contextProperty = 125
+	// } else if selfInterestingValidCount*0.1 >= avgInterestingValidCount {
+	// 	contextProperty = 10
+	// } else if selfInterestingValidCount*0.25 >= avgInterestingValidCount {
+	// 	contextProperty = 25
+	// } else if selfInterestingValidCount*0.5 >= avgInterestingValidCount {
+	// 	contextProperty = 50
+	// } else if selfInterestingValidCount*0.75 >= avgInterestingValidCount {
+	// 	contextProperty = 75
+	// }
+
+	// // 2) invalid interesting property
+	// // globalInterestingInvalidProgs := float64(qE.Target.GetGlobalInterestingInvalidCount())
+	// // avgInterestingInvalidProgs := globalInterestingInvalidProgs / callsCount
+	// selfInterestingInvalidProgs := len(qE.InterestingInvalidProgs)
+	// if selfInterestingInvalidProgs == 0 {
+	// 	contextProperty *= 1
+	// } else if selfInterestingInvalidProgs == 1 {
+	// 	contextProperty *= 1.5
+	// } else if selfInterestingInvalidProgs == 2 {
+	// 	contextProperty *= 2
+	// } else if selfInterestingInvalidProgs == 3 {
+	// 	contextProperty *= 2.5
+	// } else if selfInterestingInvalidProgs == 4 {
+	// 	contextProperty *= 3
+	// } else if selfInterestingInvalidProgs == 5 {
+	// 	contextProperty *= 3.5
+	// } else if selfInterestingInvalidProgs == 6 {
+	// 	contextProperty *= 4
+	// } else if selfInterestingInvalidProgs >= 7 {
+	// 	contextProperty *= 5
+	// }
+
+	// // 3) used budget property
+	// selfLLMBudget := qE.UsedBudget
+	// if selfLLMBudget == 0 {
+	// 	contextProperty *= 2
+	// } else if selfLLMBudget == 1 {
+	// 	contextProperty *= 1.75
+	// } else if selfLLMBudget == 2 {
+	// 	contextProperty *= 1.5
+	// } else if selfLLMBudget == 3 {
+	// 	contextProperty *= 1.25
+	// } else if selfLLMBudget == 4 {
+	// 	contextProperty *= 1
+	// } else if selfLLMBudget == 5 {
+	// 	contextProperty *= 0.75
+	// } else if selfLLMBudget == 6 {
+	// 	contextProperty *= 0.5
+	// } else if selfLLMBudget == 7 {
+	// 	contextProperty *= 0.25
+	// } else if selfLLMBudget == 8 {
+	// 	contextProperty *= 0.01
+	// } else if selfLLMBudget >= 9 {
+	// 	contextProperty *= 0.001
+	// }
+	// qE.Priority = contextProperty
+}
+
+func (qE *QueueElement) AddInterestingInvalidProg(iip *Prog) {
+	qE.qeueueElementMu.Lock()
+	defer qE.qeueueElementMu.Unlock()
+	qE.InterestingInvalidProgs = append(qE.InterestingInvalidProgs, iip)
+}
+func (qE *QueueElement) PopInterestingInvalidProg() *Prog {
+	qE.qeueueElementMu.Lock()
+	defer qE.qeueueElementMu.Unlock()
+	interestingInvalidProg := qE.InterestingInvalidProgs[0]
+	qE.InterestingInvalidProgs = qE.InterestingInvalidProgs[1:]
+	return interestingInvalidProg
+}
+func (qE *QueueElement) AddInterestingValidCount() {
+	qE.qeueueElementMu.Lock()
+	defer qE.qeueueElementMu.Unlock()
+	qE.InterestingValidCount++
+}
+func (qE *QueueElement) AddUsedBudget() {
+	qE.qeueueElementMu.Lock()
+	defer qE.qeueueElementMu.Unlock()
+	qE.UsedBudget++
+}
+
+func (target *Target) AddGlobalInterestingInvalidCount() {
+	target.globalInterestingInvalidProgsMu.Lock()
+	defer target.globalInterestingInvalidProgsMu.Unlock()
+	target.globalInterestingInvalidProgs++
+}
+func (target *Target) GetGlobalInterestingInvalidCount() int {
+	target.globalInterestingInvalidProgsMu.Lock()
+	defer target.globalInterestingInvalidProgsMu.Unlock()
+	return target.globalInterestingInvalidProgs
+}
+
+func (target *Target) AddGlobalInterestingValidCount() {
+	target.globalInterestingValidCountMu.Lock()
+	defer target.globalInterestingValidCountMu.Unlock()
+	target.globalInterestingValidCount++
+}
+func (target *Target) GetGlobalInterestingValidCount() int {
+	target.globalInterestingValidCountMu.Lock()
+	defer target.globalInterestingValidCountMu.Unlock()
+	return target.globalInterestingValidCount
+}
+
+func (target *Target) AddGlobalLLMBudget() {
+	target.globalLLMBudgetMu.Lock()
+	defer target.globalLLMBudgetMu.Unlock()
+	target.globalLLMBudget++
+}
+func (target *Target) GetGlobalLLMBudget() int {
+	target.globalLLMBudgetMu.Lock()
+	defer target.globalLLMBudgetMu.Unlock()
+	return target.globalLLMBudget
 }
 
 const maxSpecialPointers = 16
@@ -130,17 +350,6 @@ func AllTargets() []*Target {
 	return res
 }
 
-// Extend extends a target with a new set of syscalls, types, and resources.
-// It is assumed that all new syscalls, types, and resources do not conflict
-// with those already present in the target.
-func (target *Target) Extend(syscalls []*Syscall, types []Type, resources []*ResourceDesc) {
-	target.Syscalls = append(target.Syscalls, syscalls...)
-	target.Types = append(target.Types, types...)
-	target.Resources = append(target.Resources, resources...)
-	// Updates the system call map and restores any links.
-	target.initTarget()
-}
-
 func (target *Target) lazyInit() {
 	target.Neutralize = func(c *Call, fixStructure bool) error { return nil }
 	target.AnnotateCall = func(c ExecCall) string { return "" }
@@ -149,10 +358,6 @@ func (target *Target) lazyInit() {
 	target.initUselessHints()
 	target.initRelatedFields()
 	target.initArch(target)
-	// We ignore the return value here as they are cached, and it makes more
-	// sense to react to them when we attempt to execute a KFuzzTest call.
-	_, _ = target.KFuzzTestRunID()
-
 	// Give these 2 known addresses fixed positions and prepend target-specific ones at the end.
 	target.SpecialPointers = append([]uint64{
 		0x0000000000000000, // NULL pointer (keep this first because code uses special index=0 as NULL)
@@ -171,6 +376,8 @@ func (target *Target) lazyInit() {
 			panic(fmt.Sprintf("bad special file length %v", ln))
 		}
 	}
+	// These are used only during lazyInit.
+	target.Types = nil
 }
 
 func (target *Target) initTarget() {
@@ -537,25 +744,4 @@ func (pg *Builder) Finalize() (*Prog, error) {
 	p := pg.p
 	pg.p = nil
 	return p, nil
-}
-
-var kFuzzTestIDCache struct {
-	sync.Once
-	id  int
-	err error
-}
-
-// KFuzzTestRunID returns the ID for the syz_kfuzztest_run pseudo-syscall,
-// or an error if it is not found in the target.
-func (t *Target) KFuzzTestRunID() (int, error) {
-	kFuzzTestIDCache.Do(func() {
-		for _, call := range t.Syscalls {
-			if call.Attrs.KFuzzTest {
-				kFuzzTestIDCache.id = call.ID
-				return
-			}
-		}
-		kFuzzTestIDCache.err = fmt.Errorf("could not find ID for syz_kfuzztest_run - does it exist?")
-	})
-	return kFuzzTestIDCache.id, kFuzzTestIDCache.err
 }

@@ -5,9 +5,7 @@ package dispatcher
 
 import (
 	"context"
-	"fmt"
 	"runtime"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,7 +19,7 @@ func TestPoolDefault(t *testing.T) {
 
 	mgr := NewPool[*testInstance](
 		count,
-		func(_ context.Context, idx int) (*testInstance, error) {
+		func(idx int) (*testInstance, error) {
 			pool[idx].reset()
 			return &pool[idx], nil
 		},
@@ -62,7 +60,7 @@ func TestPoolSplit(t *testing.T) {
 
 	mgr := NewPool[*testInstance](
 		count,
-		func(_ context.Context, idx int) (*testInstance, error) {
+		func(idx int) (*testInstance, error) {
 			pool[idx].reset()
 			return &pool[idx], nil
 		},
@@ -89,7 +87,7 @@ func TestPoolSplit(t *testing.T) {
 		case <-stopRuns:
 		}
 	}
-	go mgr.Run(ctx, job)
+	go mgr.Run(job)
 
 	// So far, there are no reserved instances.
 	for i := 0; i < count; i++ {
@@ -115,7 +113,7 @@ func TestPoolSplit(t *testing.T) {
 
 	// Now let's create and finish more jobs.
 	for i := 0; i < 10; i++ {
-		go mgr.Run(ctx, job)
+		go mgr.Run(job)
 	}
 	mgr.ReserveForRun(2)
 	for i := 0; i < 10; i++ {
@@ -131,7 +129,7 @@ func TestPoolStress(t *testing.T) {
 	// The test to aid the race detector.
 	mgr := NewPool[*nilInstance](
 		10,
-		func(_ context.Context, idx int) (*nilInstance, error) {
+		func(idx int) (*nilInstance, error) {
 			return &nilInstance{}, nil
 		},
 		func(ctx context.Context, _ *nilInstance, _ UpdateInfo) {
@@ -152,7 +150,8 @@ func TestPoolStress(t *testing.T) {
 		}
 	}()
 	for i := 0; i < 128; i++ {
-		go mgr.Run(ctx, func(ctx context.Context, _ *nilInstance, _ UpdateInfo) {})
+		go mgr.Run(func(ctx context.Context, _ *nilInstance, _ UpdateInfo) {
+		})
 		mgr.ReserveForRun(5 + i%5)
 	}
 
@@ -166,7 +165,7 @@ func TestPoolNewDefault(t *testing.T) {
 	// The test to aid the race detector.
 	mgr := NewPool[*nilInstance](
 		10,
-		func(_ context.Context, idx int) (*nilInstance, error) {
+		func(idx int) (*nilInstance, error) {
 			return &nilInstance{}, nil
 		},
 		func(ctx context.Context, _ *nilInstance, _ UpdateInfo) {
@@ -205,7 +204,7 @@ func TestPoolNewDefault(t *testing.T) {
 func TestPoolPause(t *testing.T) {
 	mgr := NewPool[*nilInstance](
 		10,
-		func(_ context.Context, idx int) (*nilInstance, error) {
+		func(idx int) (*nilInstance, error) {
 			return &nilInstance{}, nil
 		},
 		func(ctx context.Context, _ *nilInstance, _ UpdateInfo) {
@@ -222,7 +221,7 @@ func TestPoolPause(t *testing.T) {
 	}()
 
 	run := make(chan bool, 1)
-	go mgr.Run(ctx, func(ctx context.Context, _ *nilInstance, _ UpdateInfo) {
+	go mgr.Run(func(ctx context.Context, _ *nilInstance, _ UpdateInfo) {
 		run <- true
 	})
 	time.Sleep(10 * time.Millisecond)
@@ -232,89 +231,8 @@ func TestPoolPause(t *testing.T) {
 	mgr.TogglePause(false)
 	<-run
 
-	mgr.Run(ctx, func(ctx context.Context, _ *nilInstance, _ UpdateInfo) {})
+	mgr.Run(func(ctx context.Context, _ *nilInstance, _ UpdateInfo) {})
 
-	cancel()
-	<-done
-}
-
-func TestPoolCancelRun(t *testing.T) {
-	// The test to aid the race detector.
-	mgr := NewPool[*nilInstance](
-		10,
-		func(_ context.Context, idx int) (*nilInstance, error) {
-			return &nilInstance{}, nil
-		},
-		func(ctx context.Context, _ *nilInstance, _ UpdateInfo) {
-			<-ctx.Done()
-		},
-	)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		mgr.Loop(ctx)
-		wg.Done()
-	}()
-
-	mgr.ReserveForRun(2)
-
-	started := make(chan struct{})
-	// Schedule more jobs than could be processed simultaneously.
-	for i := 0; i < 15; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			mgr.Run(ctx, func(ctx context.Context, _ *nilInstance, _ UpdateInfo) {
-				select {
-				case <-ctx.Done():
-					return
-				case started <- struct{}{}:
-				}
-				<-ctx.Done()
-			})
-		}()
-	}
-
-	// Two can be started.
-	<-started
-	<-started
-
-	// Now stop the loop and the jbos.
-	cancel()
-
-	// Everything must really stop.
-	wg.Wait()
-}
-
-// Check that the loop terminates even if no one reads from the boot error channel.
-func TestPoolBootErrors(t *testing.T) {
-	var failCount atomic.Int64
-
-	mgr := NewPool[*testInstance](
-		3,
-		func(_ context.Context, idx int) (*testInstance, error) {
-			failCount.Add(1)
-			return nil, fmt.Errorf("boot error")
-		},
-		func(ctx context.Context, _ *testInstance, _ UpdateInfo) {
-			<-ctx.Done()
-		},
-	)
-
-	done := make(chan struct{})
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		mgr.Loop(ctx)
-		close(done)
-	}()
-
-	// Wait till the boot error channel saturates.
-	for failCount.Load() < bootErrorChanCap {
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Now terminate the loop.
 	cancel()
 	<-done
 }

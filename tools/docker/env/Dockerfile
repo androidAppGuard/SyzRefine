@@ -3,6 +3,17 @@
 
 # See /tools/docker/README.md for details.
 
+# Build Python2 in a separate container to facilitate caching.
+FROM debian:bookworm AS python2-builder
+
+RUN apt-get update --allow-releaseinfo-change
+RUN DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+    wget gcc make openssl libffi-dev libgdbm-dev libsqlite3-dev libssl-dev zlib1g-dev ca-certificates
+RUN wget -O /tmp/Python-2.7.18.tgz 'https://www.python.org/ftp/python/2.7.18/Python-2.7.18.tgz'
+RUN cd /tmp/ && tar -zxf Python-2.7.18.tgz
+RUN cd /tmp/Python-2.7.18 && ./configure --prefix=/python2/
+RUN cd /tmp/Python-2.7.18 && make -j4 && make altinstall
+
 # Construct a /syzkaller folder.
 FROM debian:bookworm as syzkaller-folder
 WORKDIR /syzkaller
@@ -71,7 +82,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends
 
 # Since go 1.21 the toolchain required by go.mod is automatically downloaded.
 # There is no need to version up golang here after go.mod changes.
-RUN curl https://dl.google.com/go/go1.24.4.linux-amd64.tar.gz | tar -C /usr/local -xz
+RUN curl https://dl.google.com/go/go1.22.7.linux-amd64.tar.gz | tar -C /usr/local -xz
 ENV PATH /usr/local/go/bin:/gopath/bin:$PATH
 ENV GOPATH /gopath
 ENV GOMODCACHE /syzkaller/.cache/gomod
@@ -79,15 +90,14 @@ ENV GOMODCACHE /syzkaller/.cache/gomod
 # Install clang.
 RUN apt-get install -y -q gnupg software-properties-common apt-transport-https
 RUN curl https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -
-RUN echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-20 main" | sudo tee /etc/apt/sources.list.d/llvm-20.list
+RUN add-apt-repository "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-15 main"
 RUN apt-get update --allow-releaseinfo-change
-RUN apt-get install -y -q --no-install-recommends clang-20 clang-format-20 clang-tidy-20 lld-20
+RUN apt-get install -y -q --no-install-recommends clang-15 clang-format-15 clang-tidy-15
 RUN apt-get install -y -q --no-install-recommends flatbuffers-compiler
-RUN sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-20 100
-RUN sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-20 100
-RUN sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-20 100
-RUN sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-20 100
-RUN sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/lld-20 100
+RUN sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 100
+RUN sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+RUN sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-15 100
+RUN sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-15 100
 RUN apt autoremove -y -q
 
 # Install the Spanner emulator.
@@ -106,40 +116,27 @@ RUN dpkg --add-architecture i386 && \
 	apt-get clean autoclean && \
 	rm -rf /var/lib/apt/lists/{apt,dpkg,cache,log} /tmp/* /var/tmp/*
 
+# Install Python 2.7.
+COPY --from=python2-builder /python2/ /usr/local/
+RUN ln -s /usr/local/bin/python2.7 /usr/bin/python2
+
 # Copy the /syzkaller folder and set the toolchain environment variables.
 COPY --from=syzkaller-folder /syzkaller/ /syzkaller/
 RUN chmod 0777 /syzkaller
 ENV SOURCEDIR_FUCHSIA /syzkaller/fuchsia
 ENV SOURCEDIR_NETBSD /syzkaller/netbsd
 
-# Rust toolchain for kernel builds.
-ENV RUSTUP_HOME=/usr/local/rustup
-ENV CARGO_HOME=/usr/local/cargo
-ENV PATH=/usr/local/cargo/bin:$PATH
-ENV RUST_VERSION=1.87.0
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain $RUST_VERSION
-RUN rustup component add rust-src
-RUN cargo install --locked bindgen-cli
-
-# Use the latest libdw-dev release, otherwise we get compilation error when CONFIG_RUST=y.
-RUN echo "deb http://deb.debian.org/debian bookworm-backports main contrib non-free non-free-firmware" > /etc/apt/sources.list.d/bookworm-backports.list
-RUN apt-get update
-RUN apt-get install -y --no-install-recommends libdw-dev/bookworm-backports libelf-dev/bookworm-backports
-
 # Install node to pass act jobs (https://github.com/nektos/act)
 RUN apt-get install -y -q nodejs
 
 # Install gcloud sdk for dashboard/app tests.
-RUN curl https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-519.0.0-linux-x86_64.tar.gz | tar -C /usr/local -xz
+# The newest version (as of 07/10/23) is 437, however, it seems to expect to be run with python3
+# (but still requires python2). But Go's aetest package still runs dev_appserver.py with python2.7.
+# So let's use an older, but working sdk.
+RUN curl https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-sdk-400.0.0-linux-x86_64.tar.gz | tar -C /usr/local -xz
 ENV PATH /usr/local/google-cloud-sdk/bin:$PATH
 RUN gcloud components install --quiet app-engine-python app-engine-go app-engine-python-extras cloud-datastore-emulator
 RUN chmod 0777 /usr/local/google-cloud-sdk
-
-# Patch gcloud app-engine-python to fix projected queries problem, see issue #4785.
-RUN sed -i "s/entity\.key\.MergeFrom(original_entity\.key())/entity\.key\.MergeFrom(original_entity\.key)/g" \
-    /usr/local/google-cloud-sdk/platform/google_appengine/google/appengine/datastore/datastore_sqlite_stub.py
-RUN sed -i "s/array\.array('B', str(value_data))))/entity_pb2\.PropertyValue, array\.array('B', value_data)))/g" \
-    /usr/local/google-cloud-sdk/platform/google_appengine/google/appengine/datastore/datastore_sqlite_stub.py
 
 # The default Docker prompt is too ugly and takes the whole line:
 # I have no name!@0f3331d2fb54:~/gopath/src/github.com/google/syzkaller$

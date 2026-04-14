@@ -7,14 +7,12 @@ package gvisor
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -38,7 +36,6 @@ type Config struct {
 	Count            int    `json:"count"` // number of VMs to use
 	RunscArgs        string `json:"runsc_args"`
 	MemoryTotalBytes uint64 `json:"memory_total_bytes"`
-	CPUs             uint64 `json:"cpus"`
 }
 
 type Pool struct {
@@ -88,7 +85,7 @@ func (pool *Pool) Count() int {
 	return pool.cfg.Count
 }
 
-func (pool *Pool) Create(_ context.Context, workdir string, index int) (vmimpl.Instance, error) {
+func (pool *Pool) Create(workdir string, index int) (vmimpl.Instance, error) {
 	rootDir := filepath.Clean(filepath.Join(workdir, "..", "gvisor_root"))
 	imageDir := filepath.Join(workdir, "image")
 	bundleDir := filepath.Join(workdir, "bundle")
@@ -108,13 +105,7 @@ func (pool *Pool) Create(_ context.Context, workdir string, index int) (vmimpl.I
 	if pool.cfg.MemoryTotalBytes == 0 {
 		memoryLimit = -1
 	}
-	cpuPeriod := uint64(100000)
-	cpus := pool.cfg.CPUs
-	if cpus == 0 {
-		cpus = uint64(runtime.NumCPU())
-	}
-	cpuLimit := cpuPeriod * cpus
-	vmConfig := fmt.Sprintf(configTempl, imageDir, caps, name, memoryLimit, cpuLimit, cpuPeriod)
+	vmConfig := fmt.Sprintf(configTempl, imageDir, caps, name, memoryLimit)
 	if err := osutil.WriteFile(filepath.Join(bundleDir, "config.json"), []byte(vmConfig)); err != nil {
 		return nil, err
 	}
@@ -172,7 +163,7 @@ func (pool *Pool) Create(_ context.Context, workdir string, index int) (vmimpl.I
 	osutil.Run(time.Minute, inst.runscCmd("delete", "-force", inst.name))
 	time.Sleep(3 * time.Second)
 
-	cmd := inst.runscCmd("--panic-log", panicLog, "--cpu-num-from-quota", "run", "-bundle", bundleDir, inst.name)
+	cmd := inst.runscCmd("--panic-log", panicLog, "run", "-bundle", bundleDir, inst.name)
 	cmd.Stdout = wpipe
 	cmd.Stderr = wpipe
 	if err := cmd.Start(); err != nil {
@@ -295,7 +286,7 @@ func (inst *instance) Copy(hostSrc string) (string, error) {
 	return filepath.Join("/", fname), nil
 }
 
-func (inst *instance) Run(ctx context.Context, command string) (
+func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command string) (
 	<-chan []byte, <-chan error, error) {
 	args := []string{"exec", "-user=0:0"}
 	for _, c := range sandboxCaps {
@@ -336,7 +327,9 @@ func (inst *instance) Run(ctx context.Context, command string) (
 
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-time.After(timeout):
+			signal(vmimpl.ErrTimeout)
+		case <-stop:
 			signal(vmimpl.ErrTimeout)
 		case err := <-inst.merger.Err:
 			cmd.Process.Kill()
@@ -432,9 +425,7 @@ const configTempl = `
 		"cgroupsPath": "%[3]v",
 		"resources": {
 			"cpu": {
-				"shares": 1024,
-				"period": %[6]d,
-				"quota": %[5]d
+				"shares": 1024
 			},
 			"memory": {
 				"limit": %[4]d,

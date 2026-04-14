@@ -10,67 +10,51 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestSelectTrees(t *testing.T) {
+func TestSelectTree(t *testing.T) {
 	trees := []*api.Tree{
 		{
-			Name:       "bpf",
-			EmailLists: []string{"bpf@list"},
-		},
-		{
-			Name:       "wireless",
-			EmailLists: []string{"wireless@list"},
+			Name:       "mainline",
+			EmailLists: nil,
+			Priority:   0,
 		},
 		{
 			Name:       "net",
 			EmailLists: []string{"net@list"},
+			Priority:   1,
 		},
 		{
-			Name:       "test",
-			EmailLists: []string{"test@list"},
-		},
-		{
-			Name:       "mainline",
-			EmailLists: nil,
+			Name:       "wireless",
+			EmailLists: []string{"wireless@list"},
+			Priority:   2,
 		},
 	}
 	tests := []struct {
 		testName string
-		result   []string
+		result   string
 		series   *api.Series
 	}{
 		{
 			testName: "only-net",
-			result:   []string{"net", "mainline"},
+			result:   "net",
 			series:   &api.Series{Cc: []string{"net@list"}},
 		},
 		{
 			testName: "prefer-wireless",
-			result:   []string{"wireless", "net", "mainline"},
+			result:   "wireless",
 			series:   &api.Series{Cc: []string{"net@list", "wireless@list"}},
 		},
 		{
 			testName: "fallback",
-			result:   []string{"mainline"},
+			result:   "mainline",
 			series:   &api.Series{Cc: []string{"unknown@list"}},
-		},
-		{
-			testName: "prefer-direct-match",
-			result:   []string{"test", "wireless", "net", "mainline"},
-			series: &api.Series{
-				Cc:          []string{"net@list", "wireless@list"},
-				SubjectTags: []string{"test"},
-			},
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.testName, func(t *testing.T) {
-			ret := SelectTrees(test.series, trees)
-			var retNames []string
-			for _, tree := range ret {
-				retNames = append(retNames, tree.Name)
-			}
-			assert.Equal(t, test.result, retNames)
+			ret := SelectTree(test.series, trees)
+			assert.NotNil(t, ret)
+			assert.Equal(t, test.result, ret.Name)
 		})
 	}
 }

@@ -8,7 +8,6 @@
 package vmimpl
 
 import (
-	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -33,7 +32,7 @@ type Pool interface {
 	Count() int
 
 	// Create creates and boots a new VM instance.
-	Create(ctx context.Context, workdir string, index int) (Instance, error)
+	Create(workdir string, index int) (Instance, error)
 }
 
 // Instance represents a single VM.
@@ -48,8 +47,8 @@ type Instance interface {
 	// Run runs cmd inside of the VM (think of ssh cmd).
 	// outc receives combined cmd and kernel console output.
 	// errc receives either command Wait return error or vmimpl.ErrTimeout.
-	// Command terminates with context. Use context.WithTimeout to terminate it earlier.
-	Run(ctx context.Context, command string) (outc <-chan []byte, errc <-chan error, err error)
+	// Command is terminated after timeout. Send on the stop chan can be used to terminate it earlier.
+	Run(timeout time.Duration, stop <-chan bool, command string) (outc <-chan []byte, errc <-chan error, err error)
 
 	// Diagnose retrieves additional debugging info from the VM
 	// (e.g. by sending some sys-rq's or SIGABORT'ing a Go program).
@@ -97,14 +96,9 @@ type BootError struct {
 }
 
 func MakeBootError(err error, output []byte) error {
-	if len(output) == 0 {
-		// In reports, it may be helpful to distinguish the case when the boot output
-		// was collected, but turned out to be empty.
-		output = []byte("<empty boot output>")
-	}
 	var verboseError *osutil.VerboseError
 	if errors.As(err, &verboseError) {
-		return BootError{verboseError.Error(), append(verboseError.Output, output...)}
+		return BootError{verboseError.Title, append(verboseError.Output, output...)}
 	}
 	return BootError{err.Error(), output}
 }
@@ -171,13 +165,14 @@ var WaitForOutputTimeout = 10 * time.Second
 
 type MultiplexConfig struct {
 	Console     io.Closer
+	Stop        <-chan bool
 	Close       <-chan bool
 	Debug       bool
 	Scale       time.Duration
 	IgnoreError func(err error) bool
 }
 
-func Multiplex(ctx context.Context, cmd *exec.Cmd, merger *OutputMerger, config MultiplexConfig) (
+func Multiplex(cmd *exec.Cmd, merger *OutputMerger, timeout time.Duration, config MultiplexConfig) (
 	<-chan []byte, <-chan error, error) {
 	if config.Scale <= 0 {
 		panic("slowdown must be set")
@@ -191,7 +186,9 @@ func Multiplex(ctx context.Context, cmd *exec.Cmd, merger *OutputMerger, config 
 	}
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-time.After(timeout):
+			signal(ErrTimeout)
+		case <-config.Stop:
 			signal(ErrTimeout)
 		case <-config.Close:
 			if config.Debug {

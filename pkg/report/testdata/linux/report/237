@@ -1,6 +1,4 @@
 TITLE: INFO: rcu detected stall in mount
-ALT: INFO: rcu detected stall in ksys_mount
-ALT: stall in ksys_mount
 ALT: stall in mount
 TYPE: HANG
 

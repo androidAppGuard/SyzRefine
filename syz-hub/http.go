@@ -70,7 +70,7 @@ func (hub *Hub) httpSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 func compileTemplate(html string) *template.Template {
-	return template.Must(template.New("").Parse(strings.ReplaceAll(html, "{{STYLE}}", htmlStyle)))
+	return template.Must(template.New("").Parse(strings.Replace(html, "{{STYLE}}", htmlStyle, -1)))
 }
 
 type UISummaryData struct {

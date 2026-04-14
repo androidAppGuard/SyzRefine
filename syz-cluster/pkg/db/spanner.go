@@ -28,7 +28,6 @@ import (
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"google.golang.org/api/iterator"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 type ParsedURI struct {
@@ -105,34 +104,24 @@ func dropSpannerDB(ctx context.Context, uri ParsedURI) error {
 //go:embed migrations/*.sql
 var migrationsFs embed.FS
 
-func RunMigrations(uri string) error {
-	m, err := getMigrateInstance(uri)
-	if err != nil {
-		return err
-	}
-	err = m.Up()
-	if err == migrate.ErrNoChange {
-		// Not really an error.
-		return nil
-	}
-	return err
-}
-
-func getMigrateInstance(uri string) (*migrate.Migrate, error) {
+func RunMigrations(ctx context.Context, uri string) error {
 	sourceDriver, err := iofs.New(migrationsFs, "migrations")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	s := &migrate_spanner.Spanner{}
 	dbDriver, err := s.Open("spanner://" + uri + "?x-clean-statements=true")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	m, err := migrate.NewWithInstance("iofs", sourceDriver, "spanner", dbDriver)
-	if err != nil {
-		return nil, err
+	if err == migrate.ErrNoChange {
+		// This is not a problem.
+		return nil
+	} else if err != nil {
+		return err
 	}
-	return m, nil
+	return m.Up()
 }
 
 func NewTransientDB(t *testing.T) (*spanner.Client, context.Context) {
@@ -153,7 +142,7 @@ func NewTransientDB(t *testing.T) (*spanner.Client, context.Context) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := t.Context()
+	ctx := context.Background()
 	err = CreateSpannerInstance(ctx, uri)
 	if err != nil {
 		t.Fatal(err)
@@ -173,7 +162,7 @@ func NewTransientDB(t *testing.T) (*spanner.Client, context.Context) {
 		t.Fatal(err)
 	}
 	t.Cleanup(client.Close)
-	err = RunMigrations(uri.Full)
+	err = RunMigrations(ctx, uri.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +229,7 @@ func runSpanner(bin string) (*exec.Cmd, string, error) {
 	return cmd, host, nil
 }
 
-func readRow[T any](iter *spanner.RowIterator) (*T, error) {
+func readOne[T any](iter *spanner.RowIterator) (*T, error) {
 	row, err := iter.Next()
 	if err == iterator.Done {
 		return nil, nil
@@ -256,20 +245,10 @@ func readRow[T any](iter *spanner.RowIterator) (*T, error) {
 	return &obj, nil
 }
 
-type dbQuerier interface {
-	Query(context.Context, spanner.Statement) *spanner.RowIterator
-}
-
-func readEntity[T any](ctx context.Context, txn dbQuerier, stmt spanner.Statement) (*T, error) {
-	iter := txn.Query(ctx, stmt)
-	defer iter.Stop()
-	return readRow[T](iter)
-}
-
-func readRows[T any](iter *spanner.RowIterator) ([]*T, error) {
+func readEntities[T any](iter *spanner.RowIterator) ([]*T, error) {
 	var ret []*T
 	for {
-		obj, err := readRow[T](iter)
+		obj, err := readOne[T](iter)
 		if err != nil {
 			return nil, err
 		}
@@ -281,16 +260,8 @@ func readRows[T any](iter *spanner.RowIterator) ([]*T, error) {
 	return ret, nil
 }
 
-func readEntities[T any](ctx context.Context, txn dbQuerier, stmt spanner.Statement) ([]*T, error) {
-	iter := txn.Query(ctx, stmt)
-	defer iter.Stop()
-	return readRows[T](iter)
-}
-
-const NoLimit = 0
-
 func addLimit(stmt *spanner.Statement, limit int) {
-	if limit != NoLimit {
+	if limit > 0 {
 		stmt.SQL += " LIMIT @limit"
 		stmt.Params["limit"] = limit
 	}
@@ -307,7 +278,9 @@ func (g *genericEntityOps[EntityType, KeyType]) GetByID(ctx context.Context, key
 		SQL:    "SELECT * FROM " + g.table + " WHERE " + g.keyField + "=@key",
 		Params: map[string]interface{}{"key": key},
 	}
-	return readEntity[EntityType](ctx, g.client.Single(), stmt)
+	iter := g.client.Single().Query(ctx, stmt)
+	defer iter.Stop()
+	return readOne[EntityType](iter)
 }
 
 var ErrEntityNotFound = errors.New("entity not found")
@@ -316,10 +289,13 @@ func (g *genericEntityOps[EntityType, KeyType]) Update(ctx context.Context, key 
 	cb func(*EntityType) error) error {
 	_, err := g.client.ReadWriteTransaction(ctx,
 		func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
-			entity, err := readEntity[EntityType](ctx, txn, spanner.Statement{
+			stmt := spanner.Statement{
 				SQL:    "SELECT * from `" + g.table + "` WHERE `" + g.keyField + "`=@key",
 				Params: map[string]interface{}{"key": key},
-			})
+			}
+			iter := txn.Query(ctx, stmt)
+			entity, err := readOne[EntityType](iter)
+			iter.Stop()
 			if err != nil {
 				return err
 			}
@@ -339,8 +315,6 @@ func (g *genericEntityOps[EntityType, KeyType]) Update(ctx context.Context, key 
 	return err
 }
 
-var errEntityExists = errors.New("entity already exists")
-
 func (g *genericEntityOps[EntityType, KeyType]) Insert(ctx context.Context, obj *EntityType) error {
 	_, err := g.client.ReadWriteTransaction(ctx,
 		func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
@@ -350,13 +324,12 @@ func (g *genericEntityOps[EntityType, KeyType]) Insert(ctx context.Context, obj 
 			}
 			return txn.BufferWrite([]*spanner.Mutation{insert})
 		})
-	if status.Code(err) == codes.AlreadyExists {
-		return errEntityExists
-	}
 	return err
 }
 
 func (g *genericEntityOps[EntityType, KeyType]) readEntities(ctx context.Context, stmt spanner.Statement) (
 	[]*EntityType, error) {
-	return readEntities[EntityType](ctx, g.client.Single(), stmt)
+	iter := g.client.Single().Query(ctx, stmt)
+	defer iter.Stop()
+	return readEntities[EntityType](iter)
 }

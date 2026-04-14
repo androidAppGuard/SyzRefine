@@ -20,7 +20,7 @@ func TestSeriesInsertSession(t *testing.T) {
 	assert.NoError(t, err)
 
 	withSession := func(need int) {
-		list, err := seriesRepo.ListLatest(ctx, SeriesFilter{Limit: 10}, time.Time{})
+		list, err := seriesRepo.ListLatest(ctx, SeriesFilter{}, time.Time{}, 10)
 		assert.NoError(t, err)
 		var cnt int
 		for _, item := range list {

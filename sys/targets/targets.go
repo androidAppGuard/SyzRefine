@@ -209,10 +209,8 @@ var List = map[string]map[string]*Target{
 		TestArch64Fuzz: {
 			PtrSize:  8,
 			PageSize: 8 << 10,
-			CFlags: []string{
-				"-fsanitize=address",
-				"-no-pie",
-			},
+			// -fsanitize=address causes SIGSEGV.
+			CFlags: []string{"-no-pie"},
 			osCommon: osCommon{
 				SyscallNumbers:         true,
 				SyscallPrefix:          "SYS_",
@@ -677,7 +675,7 @@ func init() {
 		// Fix cflags by replacing compiler's -m32 option with -m31
 		if arch == S390x {
 			for i := range target.CFlags {
-				target.CFlags[i] = strings.ReplaceAll(target.CFlags[i], "-m32", "-m31")
+				target.CFlags[i] = strings.Replace(target.CFlags[i], "-m32", "-m31", -1)
 			}
 		}
 		if runtime.GOOS == OpenBSD {
@@ -783,13 +781,14 @@ func initTarget(target *Target, OS, arch string) {
 }
 
 func (target *Target) defaultDataOffset() uint64 {
-	if target.Arch == ARM64 || target.Arch == ARM {
-		// On ARM/ARM64, in many cases we can't use many enough bits of the address space.
-		// Let's use the old value for now. It's also problematic (see #5770), but it's
-		// lesser of the two evils.
-		return 0x20000000
-	}
 	if target.PtrSize == 8 {
+		if target.Arch == ARM64 {
+			// On ARM64, in many cases we can't use many enough bits of the address space.
+			// Let's use the old value for now. It's also problematic (see #5770), but it's
+			// lesser of the two evils.
+			return 0x20000000
+		}
+
 		// An address from ASAN's 64-bit HighMem area.
 		// 0x200000000000 works both for arm64 and amd64. We don't run syzkaller tests on any other platform.
 		// During real fuzzing, we don't build with ASAN, so the address should not matter much as long as
@@ -882,11 +881,6 @@ func (target *Target) Timeouts(slowdown int) Timeouts {
 	return timeouts
 }
 
-const (
-	DefaultLLVMCompiler = "clang"
-	DefaultLLVMLinker   = "ld.lld"
-)
-
 func (target *Target) setCompiler(clang bool) {
 	// setCompiler may be called effectively twice for target.other,
 	// so first we remove flags the previous call may have added.
@@ -901,9 +895,9 @@ func (target *Target) setCompiler(clang bool) {
 	}
 	target.CFlags = target.CFlags[:pos]
 	if clang {
-		target.CCompiler = DefaultLLVMCompiler
-		target.KernelCompiler = DefaultLLVMCompiler
-		target.KernelLinker = DefaultLLVMLinker
+		target.CCompiler = "clang"
+		target.KernelCompiler = "clang"
+		target.KernelLinker = "ld.lld"
 		if target.Triple != "" {
 			target.CFlags = append(target.CFlags, "--target="+target.Triple)
 		}
@@ -926,7 +920,7 @@ func (target *Target) replaceSourceDir(param *string, sourceDir string) {
 		target.BrokenCompiler = "SOURCEDIR is not set"
 		return
 	}
-	*param = strings.ReplaceAll(*param, sourceDirVar, sourceDir)
+	*param = strings.Replace(*param, sourceDirVar, sourceDir, -1)
 }
 
 func (target *Target) lazyInit() {
@@ -1010,8 +1004,7 @@ func (target *Target) lazyInit() {
 		cmd := exec.Command(comp, args...)
 		cmd.Stdin = strings.NewReader(prog)
 		if out, err := cmd.CombinedOutput(); err != nil {
-			target.BrokenCompiler = fmt.Sprintf("error running command: '%s':\ngotoutput: %s",
-				comp+" "+strings.Join(args, " "), out)
+			target.BrokenCompiler = string(out)
 			return
 		}
 	}

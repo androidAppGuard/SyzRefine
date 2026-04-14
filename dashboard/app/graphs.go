@@ -13,8 +13,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/google/syzkaller/pkg/report"
-	"github.com/google/syzkaller/pkg/report/crash"
 	db "google.golang.org/appengine/v2/datastore"
 )
 
@@ -356,25 +354,25 @@ func createFoundBugs(c context.Context, bugs []*Bug) *uiGraph {
 	types := []struct {
 		name  string
 		color string
-		pred  crash.TypeGroupPred
+		re    *regexp.Regexp
 	}{
-		{"KASAN", "Red", crash.Type.IsKASAN},
-		{"KMSAN", "Gold", crash.Type.IsKMSAN},
-		{"KCSAN", "Fuchsia", crash.Type.IsKCSAN},
-		{"mem safety", "OrangeRed", crash.Type.IsMemSafety},
-		{"mem leak", "MediumSeaGreen", crash.Type.IsMemoryLeak},
-		{"locking", "DodgerBlue", crash.Type.IsLockingBug},
-		{"hangs/stalls", "LightSalmon", crash.Type.IsHang},
+		{"KASAN", "Red", regexp.MustCompile(`^KASAN:`)},
+		{"KMSAN", "Gold", regexp.MustCompile(`^KMSAN:`)},
+		{"KCSAN", "Fuchsia", regexp.MustCompile(`^KCSAN:`)},
+		{"mem safety", "OrangeRed", regexp.MustCompile(`^(WARNING: refcount bug|UBSAN: array-index|BUG: corrupted list|BUG: unable to handle kernel paging request)`)},
+		{"mem leak", "MediumSeaGreen", regexp.MustCompile(`^memory leak`)},
+		{"locking", "DodgerBlue", regexp.MustCompile(`^(BUG: sleeping function|BUG: spinlock recursion|BUG: using ([a-z_]+)\\(\\) in preemptible|inconsistent lock state|WARNING: still has locks held|possible deadlock|WARNING: suspicious RCU usage)`)},
+		{"hangs/stalls", "LightSalmon", regexp.MustCompile(`^(BUG: soft lockup|INFO: rcu .* stall|INFO: task hung)`)},
 		// This must be at the end, otherwise "BUG:" will match other error types.
-		{"DoS", "Violet", crash.Type.IsDoS},
-		{"other", "Gray", func(crash.Type) bool { return true }},
+		{"DoS", "Violet", regexp.MustCompile(`^(BUG:|kernel BUG|divide error|Internal error in|kernel panic:|general protection fault)`)},
+		{"other", "Gray", regexp.MustCompile(`.*`)},
 		{projected, "LightGray", nil},
 	}
 	var sorted []time.Time
 	months := make(map[time.Time]map[string]int)
 	for _, bug := range bugs {
 		for _, typ := range types {
-			if !typ.pred(report.TitleToCrashType(bug.Title)) {
+			if !typ.re.MatchString(bug.Title) {
 				continue
 			}
 			t := bug.FirstTime

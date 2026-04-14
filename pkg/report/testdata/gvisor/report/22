@@ -1,5 +1,4 @@
 TITLE: panic: ptrace get fpregs failed: no such process
-TYPE: DoS
 SUPPRESSED: Y
 
 panic: ptrace get fpregs failed: no such process

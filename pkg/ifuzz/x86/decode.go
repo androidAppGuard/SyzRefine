@@ -65,22 +65,20 @@ func (insnset *InsnSet) Decode(mode iset.Mode, text []byte) (int, error) {
 		for len(text) != 0 && prefixes[text[0]] {
 			switch text[0] {
 			case 0x66:
-				switch immSize {
-				case 4:
+				if immSize == 4 {
 					immSize1 = 2
 					operSize1 = 2
-				case 2:
+				} else if immSize == 2 {
 					immSize1 = 4
 					operSize1 = 4
 				}
 			case 0x67:
-				switch addrSize {
-				case 8:
+				if addrSize == 8 {
 					addrSize1 = 4
-				case 4:
+				} else if addrSize == 4 {
 					dispSize1 = 2
 					addrSize1 = 2
-				case 2:
+				} else if addrSize == 2 {
 					dispSize1 = 4
 					addrSize1 = 4
 				}

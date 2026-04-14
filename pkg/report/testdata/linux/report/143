@@ -1,5 +1,4 @@
 TITLE: kernel panic: Attempted to kill init!
-TYPE: DoS
 SUPPRESSED: Y
 
 INIT: PANIC: segmentation violation! sleeping for 30 seconds.

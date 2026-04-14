@@ -3,8 +3,6 @@
 
 package subsystem
 
-import "fmt"
-
 // In general, it's not correct to assume that subsystems are only determined by target.OS,
 // because subsystems are related not to the user interface of the OS kernel, but rather to
 // the OS kernel implementation.
@@ -15,36 +13,20 @@ import "fmt"
 // Therefore, subsystem lists have to be a completely different entity.
 
 var (
-	lists = make(map[string]registeredSubsystem)
+	lists = make(map[string][]*Subsystem)
 )
 
-type registeredSubsystem struct {
-	list     []*Subsystem
-	revision int
-}
-
-func RegisterList(name string, list []*Subsystem, revision int) {
+func RegisterList(name string, list []*Subsystem) {
 	if _, ok := lists[name]; ok {
 		panic(name + " subsystem list already exists!")
 	}
-	lists[name] = registeredSubsystem{
-		list:     list,
-		revision: revision,
-	}
+	lists[name] = list
 }
 
 func GetList(name string) []*Subsystem {
-	info, ok := lists[name]
-	if !ok {
-		panic(fmt.Sprintf("list %q is not registered", name))
-	}
-	return info.list
+	return lists[name]
 }
 
 func ListService(name string) *Service {
-	info, ok := lists[name]
-	if !ok {
-		panic(fmt.Sprintf("list %q is not registered", name))
-	}
-	return MustMakeService(info.list, info.revision)
+	return MustMakeService(lists[name])
 }

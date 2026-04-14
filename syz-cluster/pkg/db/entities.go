@@ -10,15 +10,13 @@ import (
 )
 
 type Series struct {
-	ID          string `spanner:"ID"`
-	ExtID       string `spanner:"ExtID"`
-	AuthorName  string `spanner:"AuthorName"`
-	AuthorEmail string `spanner:"AuthorEmail"`
-	Title       string `spanner:"Title"`
-	Link        string `spanner:"Link"`
-	Version     int64  `spanner:"Version"`
-	// In LKML patches, there are often hints at the target tree for the patch.
-	SubjectTags []string  `spanner:"SubjectTags"`
+	ID          string    `spanner:"ID"`
+	ExtID       string    `spanner:"ExtID"`
+	AuthorName  string    `spanner:"AuthorName"`
+	AuthorEmail string    `spanner:"AuthorEmail"`
+	Title       string    `spanner:"Title"`
+	Link        string    `spanner:"Link"`
+	Version     int64     `spanner:"Version"`
 	PublishedAt time.Time `spanner:"PublishedAt"`
 	// TODO: we could ger rid of the field by using slightly more complicated SQL queries.
 	LatestSessionID spanner.NullString `spanner:"LatestSessionID"`
@@ -41,16 +39,13 @@ type Patch struct {
 type Build struct {
 	ID         string             `spanner:"ID"`
 	TreeName   string             `spanner:"TreeName"`
-	TreeURL    string             `spanner:"TreeURL"`
 	CommitHash string             `spanner:"CommitHash"`
 	CommitDate time.Time          `spanner:"CommitDate"`
 	SeriesID   spanner.NullString `spanner:"SeriesID"`
 	Arch       string             `spanner:"Arch"`
 	ConfigName string             `spanner:"ConfigName"`
 	ConfigURI  string             `spanner:"ConfigURI"`
-	LogURI     string             `spanner:"LogURI"`
 	Status     string             `spanner:"Status"`
-	Compiler   string             `spanner:"Compiler"`
 }
 
 func (b *Build) SetSeriesID(val string) {
@@ -65,48 +60,16 @@ const (
 )
 
 type Session struct {
-	ID           string             `spanner:"ID"`
-	SeriesID     string             `spanner:"SeriesID"`
-	CreatedAt    time.Time          `spanner:"CreatedAt"`
-	StartedAt    spanner.NullTime   `spanner:"StartedAt"`
-	FinishedAt   spanner.NullTime   `spanner:"FinishedAt"`
-	SkipReason   spanner.NullString `spanner:"SkipReason"`
-	LogURI       string             `spanner:"LogURI"`
-	TriageLogURI string             `spanner:"TriageLogURI"`
-	Tags         []string           `spanner:"Tags"`
+	ID         string             `spanner:"ID"`
+	SeriesID   string             `spanner:"SeriesID"`
+	CreatedAt  time.Time          `spanner:"CreatedAt"`
+	StartedAt  spanner.NullTime   `spanner:"StartedAt"`
+	FinishedAt spanner.NullTime   `spanner:"FinishedAt"`
+	SkipReason spanner.NullString `spanner:"SkipReason"`
+	LogURI     string             `spanner:"LogURI"`
+	Tags       []string           `spanner:"Tags"`
 	// TODO: to accept more specific fuzzing assignment,
 	// add Triager, BaseRepo, BaseCommit, Config fields.
-}
-
-type SessionStatus string
-
-const (
-	SessionStatusWaiting    SessionStatus = "waiting"
-	SessionStatusInProgress SessionStatus = "in progress"
-	SessionStatusFinished   SessionStatus = "finished"
-	SessionStatusSkipped    SessionStatus = "skipped"
-	// To be used in filters.
-	SessionStatusAny SessionStatus = ""
-)
-
-// It could have been a calculated field in Spanner, but the Go library for Spanner currently
-// does not support read-only fields.
-func (s *Session) Status() SessionStatus {
-	if s.StartedAt.IsNull() {
-		return SessionStatusWaiting
-	} else if s.FinishedAt.IsNull() {
-		return SessionStatusInProgress
-	} else if !s.SkipReason.IsNull() {
-		return SessionStatusSkipped
-	}
-	return SessionStatusFinished
-}
-
-func (s *Session) Duration() time.Duration {
-	if s.FinishedAt.IsNull() {
-		return 0
-	}
-	return s.FinishedAt.Time.Sub(s.StartedAt.Time).Truncate(time.Minute)
 }
 
 func (s *Session) SetStartedAt(t time.Time) {
@@ -122,26 +85,22 @@ func (s *Session) SetSkipReason(reason string) {
 }
 
 type SessionTest struct {
-	SessionID           string             `spanner:"SessionID"`
-	BaseBuildID         spanner.NullString `spanner:"BaseBuildID"`
-	PatchedBuildID      spanner.NullString `spanner:"PatchedBuildID"`
-	UpdatedAt           time.Time          `spanner:"UpdatedAt"`
-	TestName            string             `spanner:"TestName"`
-	Result              string             `spanner:"Result"`
-	LogURI              string             `spanner:"LogURI"`
-	ArtifactsArchiveURI string             `spanner:"ArtifactsArchiveURI"`
+	SessionID      string             `spanner:"SessionID"`
+	BaseBuildID    spanner.NullString `spanner:"BaseBuildID"`
+	PatchedBuildID spanner.NullString `spanner:"PatchedBuildID"`
+	UpdatedAt      time.Time          `spanner:"UpdatedAt"`
+	TestName       string             `spanner:"TestName"`
+	Result         string             `spanner:"Result"`
+	LogURI         string             `spanner:"LogURI"`
 }
 
 type Finding struct {
-	ID              string `spanner:"ID"`
-	SessionID       string `spanner:"SessionID"`
-	TestName        string `spanner:"TestName"`
-	Title           string `spanner:"Title"`
-	ReportURI       string `spanner:"ReportURI"`
-	LogURI          string `spanner:"LogURI"`
-	SyzReproURI     string `spanner:"SyzReproURI"`
-	SyzReproOptsURI string `spanner:"SyzReproOptsURI"`
-	CReproURI       string `spanner:"CReproURI"`
+	ID        string `spanner:"ID"`
+	SessionID string `spanner:"SessionID"`
+	TestName  string `spanner:"TestName"`
+	Title     string `spanner:"Title"`
+	ReportURI string `spanner:"ReportURI"`
+	LogURI    string `spanner:"LogURI"`
 }
 
 type SessionReport struct {
@@ -149,24 +108,9 @@ type SessionReport struct {
 	SessionID  string           `spanner:"SessionID"`
 	ReportedAt spanner.NullTime `spanner:"ReportedAt"`
 	Moderation bool             `spanner:"Moderation"`
-	Reporter   string           `spanner:"Reporter"`
+	Link       string           `spanner:"Link"`
 }
 
 func (s *SessionReport) SetReportedAt(t time.Time) {
 	s.ReportedAt = spanner.NullTime{Time: t, Valid: true}
-}
-
-type ReportReply struct {
-	MessageID string    `spanner:"MessageID"`
-	ReportID  string    `spanner:"ReportID"`
-	Time      time.Time `spanner:"Time"`
-}
-
-// BaseFinding collects all crashes observed on the base kernel tree.
-// It will be used to avoid unnecessary bug reproduction attempts.
-type BaseFinding struct {
-	CommitHash string `spanner:"CommitHash"`
-	Config     string `spanner:"Config"`
-	Arch       string `spanner:"Arch"`
-	Title      string `spanner:"Title"`
 }

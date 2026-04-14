@@ -44,15 +44,10 @@ type SyscallAttrs struct {
 	BreaksReturns   bool
 	NoGenerate      bool
 	NoMinimize      bool
-	NoSquash        bool
 	RemoteCover     bool
 	Automatic       bool
 	AutomaticHelper bool
-	KFuzzTest       bool
 	Fsck            string
-	// Filesystem is used in tools/syz-imagegen when fs name cannot be deduced from
-	// the part after $.
-	Filesystem string
 }
 
 // MaxArgs is maximum number of syscall arguments.
@@ -194,7 +189,7 @@ type Type interface {
 	isDefaultArg(arg Arg) bool
 	generate(r *randGen, s *state, dir Dir) (arg Arg, calls []*Call)
 	mutate(r *randGen, s *state, arg Arg, ctx ArgCtx) (calls []*Call, retry, preserve bool)
-	getMutationPrio(target *Target, arg Arg, ignoreSpecial, ignoreLengths bool) (prio float64, stopRecursion bool)
+	getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (prio float64, stopRecursion bool)
 	minimize(ctx *minimizeArgsCtx, arg Arg, path string) bool
 	ref() Ref
 	setRef(ref Ref)
@@ -224,7 +219,7 @@ func (ti Ref) generate(r *randGen, s *state, dir Dir) (Arg, []*Call) { panic("pr
 func (ti Ref) mutate(r *randGen, s *state, arg Arg, ctx ArgCtx) ([]*Call, bool, bool) {
 	panic("prog.Ref method called")
 }
-func (ti Ref) getMutationPrio(target *Target, arg Arg, ignoreSpecial, ignoreLengths bool) (float64, bool) {
+func (ti Ref) getMutationPrio(target *Target, arg Arg, ignoreSpecial bool) (float64, bool) {
 	panic("prog.Ref method called")
 }
 func (ti Ref) minimize(ctx *minimizeArgsCtx, arg Arg, path string) bool {
@@ -820,43 +815,31 @@ func (t *UnionType) String() string {
 }
 
 func (t *UnionType) DefaultArg(dir Dir) Arg {
-	idx, _ := t.defaultField()
+	idx := t.defaultField()
 	f := t.Fields[idx]
 	arg := MakeUnionArg(t, dir, f.DefaultArg(f.Dir(dir)), idx)
 	arg.transient = t.isConditional()
 	return arg
 }
 
-func (t *UnionType) defaultField() (int, bool) {
-	// If it's a conditional union, the last field is usually a safe choice for the default value as
-	// it must have no condition.
-	// Auto-generated wrappers for conditional fields are an exception since both fields will have
-	// conditions, and, moreover, these conditions will be mutually exclusive.
+func (t *UnionType) defaultField() int {
+	// If it's a conditional union, the last field will be the default value.
 	if t.isConditional() {
-		if t.Fields[len(t.Fields)-1].Condition != nil {
-			// There's no correct default index.
-			return 0, false
-		}
-		return len(t.Fields) - 1, true
+		return len(t.Fields) - 1
 	}
 	// Otherwise, just take the first.
-	return 0, true
+	return 0
 }
 
 func (t *UnionType) isConditional() bool {
-	// Either all fields will have a conditions, or all except the last one, or none.
-	// So checking for the first one is always enough.
+	// In pkg/compiler, we ensure that either none of the fields have conditions,
+	// or all except the last one.
 	return t.Fields[0].Condition != nil
 }
 
 func (t *UnionType) isDefaultArg(arg Arg) bool {
 	a := arg.(*UnionArg)
-	defIdx, ok := t.defaultField()
-	if !ok {
-		// Any value is the only possible option.
-		return isDefault(a.Option)
-	}
-	return a.Index == defIdx && isDefault(a.Option)
+	return a.Index == t.defaultField() && isDefault(a.Option)
 }
 
 type ConstValue struct {

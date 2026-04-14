@@ -8,6 +8,8 @@
 // https://cloud.google.com/go/getting-started/using-cloud-storage
 // https://godoc.org/cloud.google.com/go/storage
 
+//go:generate ../../tools/mockery.sh --name Client -r
+
 package gcs
 
 import (
@@ -24,13 +26,13 @@ import (
 
 type Client interface {
 	Close() error
-	FileReader(path string) (io.ReadCloser, error)
+	Read(path string) (*File, error)
 	FileWriter(path string, contentType string, contentEncoding string) (io.WriteCloser, error)
 	DeleteFile(path string) error
 	FileExists(path string) (bool, error)
 	ListObjects(path string) ([]*Object, error)
 
-	Publish(path string) error
+	publish(path string) error
 }
 
 type UploadOptions struct {
@@ -61,7 +63,7 @@ func UploadFile(ctx context.Context, srcFile io.Reader, destURL string, opts Upl
 		return fmt.Errorf("gcsWriter.Close: %w", err)
 	}
 	if opts.Publish {
-		return gcsClient.Publish(destURL)
+		return gcsClient.publish(destURL)
 	}
 	return nil
 }
@@ -69,6 +71,17 @@ func UploadFile(ctx context.Context, srcFile io.Reader, destURL string, opts Upl
 type client struct {
 	client *storage.Client
 	ctx    context.Context
+}
+
+type File struct {
+	Updated time.Time
+
+	ctx    context.Context
+	handle *storage.ObjectHandle
+}
+
+func (file *File) Reader() (io.ReadCloser, error) {
+	return file.handle.NewReader(file.ctx)
 }
 
 func NewClient(ctx context.Context) (Client, error) {
@@ -87,7 +100,7 @@ func (c *client) Close() error {
 	return c.client.Close()
 }
 
-func (c *client) FileReader(gcsFile string) (io.ReadCloser, error) {
+func (c *client) Read(gcsFile string) (*File, error) {
 	bucket, filename, err := split(gcsFile)
 	if err != nil {
 		return nil, err
@@ -105,7 +118,12 @@ func (c *client) FileReader(gcsFile string) (io.ReadCloser, error) {
 		GenerationMatch:     attrs.Generation,
 		MetagenerationMatch: attrs.Metageneration,
 	})
-	return handle.NewReader(c.ctx)
+	file := &File{
+		Updated: attrs.Updated,
+		ctx:     c.ctx,
+		handle:  handle,
+	}
+	return file, nil
 }
 
 func (c *client) FileWriter(gcsFile, contentType, contentEncoding string) (io.WriteCloser, error) {
@@ -125,8 +143,8 @@ func (c *client) FileWriter(gcsFile, contentType, contentEncoding string) (io.Wr
 	return w, nil
 }
 
-// Publish lets any user read gcsFile.
-func (c *client) Publish(gcsFile string) error {
+// publish lets any user read gcsFile.
+func (c *client) publish(gcsFile string) error {
 	bucket, filename, err := split(gcsFile)
 	if err != nil {
 		return err
@@ -143,7 +161,7 @@ func (c *client) DeleteFile(gcsFile string) error {
 		return err
 	}
 	err = c.client.Bucket(bucket).Object(filename).Delete(c.ctx)
-	if errors.Is(err, storage.ErrObjectNotExist) {
+	if err == storage.ErrObjectNotExist {
 		return ErrFileNotFound
 	}
 	return err
@@ -155,7 +173,7 @@ func (c *client) FileExists(gcsFile string) (bool, error) {
 		return false, err
 	}
 	_, err = c.client.Bucket(bucket).Object(filename).Attrs(c.ctx)
-	if errors.Is(err, storage.ErrObjectNotExist) {
+	if err == storage.ErrObjectNotExist {
 		return false, nil
 	} else if err != nil {
 		return false, err

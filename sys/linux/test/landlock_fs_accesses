@@ -1,4 +1,7 @@
 # Create and access multiple type of files
+#
+# Device creation requires some privileges:
+# requires: -sandbox=namespace -sandbox=setuid
 
 # Makes a character device /dev/null
 

@@ -13,13 +13,12 @@ import (
 )
 
 type EmailReader struct {
-	vcs.CommitShort
 	Read func() ([]byte, error)
 }
 
 // ReadArchive queries the parsed messages from a single LKML message archive.
-func ReadArchive(repo vcs.Repo, afterCommit string, afterTime time.Time) ([]EmailReader, error) {
-	commits, err := repo.LatestCommits(afterCommit, afterTime)
+func ReadArchive(repo vcs.Repo, fromTime time.Time) ([]EmailReader, error) {
+	commits, err := repo.ListCommitHashes("HEAD", fromTime)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get recent commits: %w", err)
 	}
@@ -27,37 +26,27 @@ func ReadArchive(repo vcs.Repo, afterCommit string, afterTime time.Time) ([]Emai
 	for _, iterCommit := range commits {
 		commit := iterCommit
 		ret = append(ret, EmailReader{
-			CommitShort: commit,
 			Read: func() ([]byte, error) {
-				return repo.Object("m", commit.Hash)
+				return repo.Object("m", commit)
 			},
 		})
 	}
 	return ret, nil
 }
 
-type Email struct {
-	*email.Email
-	HasPatch bool
-}
-
-func (er *EmailReader) Parse(emails, domains []string) (*Email, error) {
+func (er *EmailReader) Parse(emails, domains []string) (*email.Email, error) {
 	body, err := er.Read()
 	if err != nil {
 		return nil, err
 	}
-	return emailFromRaw(body, emails, domains)
-}
-
-func emailFromRaw(body []byte, emails, domains []string) (*Email, error) {
 	msg, err := email.Parse(bytes.NewReader(body), emails, nil, domains)
 	if err != nil {
 		return nil, err
 	}
-	ret := &Email{Email: msg, HasPatch: msg.Patch != ""}
 	// Keep memory consumption low.
-	ret.Body = ""
-	ret.Patch = ""
+	msg.Body = ""
+	msg.Patch = ""
+	// TODO: We definitely don't care about the patch here. Add an option to avoid extracting it?
 	// TODO: If emails/domains are nil, we also don't need to parse the body at all.
-	return ret, nil
+	return msg, nil
 }

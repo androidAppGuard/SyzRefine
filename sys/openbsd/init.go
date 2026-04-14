@@ -170,21 +170,20 @@ func (arch *arch) neutralizeRlimit(c *prog.Call) {
 	rlimitMin := uint64(0)
 	rlimitMax := uint64(math.MaxUint64)
 	resource := c.Args[0].(*prog.ConstArg).Val & rlimitMask
-	switch resource {
-	case arch.RLIMIT_DATA:
+	if resource == arch.RLIMIT_DATA {
 		// OpenBSD performs a strict validation of the RLIMIT_DATA soft
 		// limit during memory allocation. Lowering the same limit could
 		// cause syz-executor to run out of memory quickly. Therefore
 		// make sure to not go lower than the default soft limit for the
 		// staff group.
 		rlimitMin = 1536 * 1024 * 1024
-	case arch.RLIMIT_STACK:
+	} else if resource == arch.RLIMIT_STACK {
 		// Do not allow the stack to grow beyond the initial soft limit
 		// chosen by syz-executor. Otherwise, syz-executor will most
 		// likely not be able to perform any more heap allocations since
 		// they majority of memory is reserved for the stack.
 		rlimitMax = 1 * 1024 * 1024
-	default:
+	} else {
 		return
 	}
 

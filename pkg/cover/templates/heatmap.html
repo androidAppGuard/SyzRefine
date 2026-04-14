@@ -33,9 +33,6 @@
     width: 50px;
     text-align: right;
   }
-  .instrumented_column > pre {
-    margin: 0
-  }
   .tree_depth_0 {width: 0px;}
   .tree_depth_1 {width: 20px;}
   .tree_depth_2 {width: 40px;}
@@ -104,9 +101,6 @@
   .cover_percent:hover .tooltiptext {
     visibility: visible;
   }
-  #collapsible-list {
-    font-family: monospace;
-  }
 {{ end }}
 
 {{ define "body" }}
@@ -165,7 +159,7 @@
           </div>
           {{ end }}
           <div class="instrumented_column vertical_text">
-            {{ approxInstr .Root.Summary }} blocks
+            {{ approxInstr .Root.LastDayInstrumented }} blocks
           </div>
         </li>
         <li>
@@ -221,7 +215,7 @@
           </div>
         {{ end }}
         <div class="instrumented_column">
-          <pre>{{ approxInstr $child.Summary }}</pre>
+          {{ approxInstr $child.LastDayInstrumented }}
         </div>
       </div>
       {{ if $child.IsDir }}

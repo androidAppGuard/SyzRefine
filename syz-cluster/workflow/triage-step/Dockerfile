@@ -1,7 +1,7 @@
 # Copyright 2024 syzkaller project authors. All rights reserved.
 # Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
-FROM golang:1.24-alpine AS triage-step-builder
+FROM golang:1.23-alpine AS triage-step-builder
 
 WORKDIR /build
 
@@ -26,10 +26,7 @@ RUN apt-get update && \
     apt-get install -y git
 
 # pkg/osutil uses syzkaller user for sandboxing.
-RUN useradd -u 10000 --create-home syzkaller
-# Prevent "fatal: detected dubious ownership in repository" errors.
-RUN git config --system --add safe.directory /workdir
-RUN git config --system --add safe.directory /kernel-repo
+RUN useradd --create-home syzkaller
 
 COPY --from=triage-step-builder /build/triage-step-bin /bin/triage-step
 

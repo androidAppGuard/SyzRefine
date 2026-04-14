@@ -4,29 +4,19 @@
 package triage
 
 import (
-	"sort"
 	"strings"
 
 	"github.com/google/syzkaller/syz-cluster/pkg/api"
 )
 
-// SelectTrees returns an ordered list of git trees to apply the series to.
-func SelectTrees(series *api.Series, trees []*api.Tree) []*api.Tree {
+// TODO: add tests.
+func SelectTree(series *api.Series, trees []*api.Tree) *api.Tree {
 	seriesCc := map[string]bool{}
 	for _, cc := range series.Cc {
 		seriesCc[strings.ToLower(cc)] = true
 	}
-	tagsMap := map[string]bool{}
-	for _, tag := range series.SubjectTags {
-		tagsMap[tag] = true
-	}
-	var result []*api.Tree
+	var best *api.Tree
 	for _, tree := range trees {
-		if tagsMap[tree.Name] {
-			// If the tree was directly mentioned in the patch subject, always take it.
-			result = append(result, tree)
-			continue
-		}
 		intersects := false
 		for _, cc := range tree.EmailLists {
 			if seriesCc[strings.ToLower(cc)] {
@@ -37,11 +27,9 @@ func SelectTrees(series *api.Series, trees []*api.Tree) []*api.Tree {
 		if len(tree.EmailLists) > 0 && !intersects {
 			continue
 		}
-		result = append(result, tree)
+		if best == nil || tree.Priority > best.Priority {
+			best = tree
+		}
 	}
-	sort.SliceStable(result, func(i, j int) bool {
-		// First the trees from the patch subject, then everything else.
-		return tagsMap[result[i].Name] && !tagsMap[result[j].Name]
-	})
-	return result
+	return best
 }

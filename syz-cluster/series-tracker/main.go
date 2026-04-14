@@ -26,6 +26,8 @@ import (
 )
 
 var (
+	flagArchives = flag.String("archives", "",
+		"a comma-separated list of the archives to poll")
 	flagVerbose = flag.Bool("verbose", false, "enable verbose output")
 )
 
@@ -56,14 +58,18 @@ func main() {
 }
 
 func archivesToPoll() []string {
-	cfg, err := app.Config()
-	if err != nil {
-		app.Fatalf("failed to fetch the config: %v", err)
+	var ret []string
+	for _, part := range strings.Split(*flagArchives, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			app.Fatalf("an empty name in the --archives argument")
+		}
+		ret = append(ret, part)
 	}
-	if len(cfg.LoreArchives) == 0 {
-		app.Fatalf("the list of archives to poll is empty")
+	if len(ret) == 0 {
+		app.Fatalf("--archives must not be empty")
 	}
-	return cfg.LoreArchives
+	return ret
 }
 
 type SeriesFetcher struct {
@@ -100,10 +106,7 @@ func (sf *SeriesFetcher) Update(ctx context.Context, from time.Time) error {
 		if err != nil {
 			return fmt.Errorf("failed to poll %q: %w", url, err)
 		}
-		// We could have been fetching the emails precisely starting from the last Update() attempt,
-		// but since we may only save it once the whole series is there, it's easier to just look at all
-		// the recent messages.
-		repoList, err := lore.ReadArchive(gitRepo, "", from)
+		repoList, err := lore.ReadArchive(gitRepo, from)
 		if err != nil {
 			return err
 		}
@@ -111,7 +114,7 @@ func (sf *SeriesFetcher) Update(ctx context.Context, from time.Time) error {
 		list = append(list, repoList...)
 	}
 
-	var emails []*lore.Email
+	var emails []*email.Email
 	idToReader := map[string]lore.EmailReader{}
 	for _, item := range list {
 		// TODO: this could be done in several threads.
@@ -156,10 +159,10 @@ func (sf *SeriesFetcher) handleSeries(ctx context.Context, series *lore.Series,
 	apiSeries := &api.Series{
 		ExtID:       series.MessageID,
 		AuthorEmail: first.Author,
+		// TODO: set Cc.
 		Title:       series.Subject,
 		Version:     series.Version,
-		SubjectTags: series.Tags,
-		Link:        loreLink(series.MessageID),
+		Link:        "https://lore.kernel.org/all/" + series.MessageID,
 		PublishedAt: date,
 	}
 	sp := seriesProcessor{}
@@ -197,10 +200,6 @@ func (sf *SeriesFetcher) handleSeries(ctx context.Context, series *lore.Series,
 	}
 	log.Printf("series %s saved to the DB", series.MessageID)
 	return nil
-}
-
-func loreLink(messageID string) string {
-	return "https://lore.kernel.org/all/" + strings.Trim(messageID, "<>")
 }
 
 type seriesProcessor map[string]struct{}

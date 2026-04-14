@@ -5,7 +5,6 @@ package proxyapp
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"net/rpc"
@@ -239,7 +238,7 @@ func TestPool_Create_Ok(t *testing.T) {
 		On("CreateInstance", mock.Anything, mock.Anything).
 		Return(nil)
 
-	inst, err := p.Create(t.Context(), "workdir", 0)
+	inst, err := p.Create("workdir", 0)
 	assert.NotNil(t, inst)
 	assert.Nil(t, err)
 }
@@ -257,7 +256,7 @@ func TestPool_Create_ProxyNilError(t *testing.T) {
 
 	p.(io.Closer).Close()
 
-	inst, err := p.Create(t.Context(), "workdir", 0)
+	inst, err := p.Create("workdir", 0)
 	assert.Nil(t, inst)
 	assert.NotNil(t, err)
 }
@@ -272,7 +271,7 @@ func TestPool_Create_OutOfPoolError(t *testing.T) {
 		}).
 		Return(fmt.Errorf("out of pool size"))
 
-	inst, err := p.Create(t.Context(), "workdir", p.Count())
+	inst, err := p.Create("workdir", p.Count())
 	assert.Nil(t, inst)
 	assert.NotNil(t, err)
 }
@@ -283,7 +282,7 @@ func TestPool_Create_ProxyFailure(t *testing.T) {
 		On("CreateInstance", mock.Anything, mock.Anything).
 		Return(fmt.Errorf("create instance failure"))
 
-	inst, err := p.Create(t.Context(), "workdir", 0)
+	inst, err := p.Create("workdir", 0)
 	assert.Nil(t, inst)
 	assert.NotNil(t, err)
 }
@@ -300,7 +299,7 @@ func createInstanceFixture(t *testing.T) (*mock.Mock, vmimpl.Instance) {
 		}).
 		Return(nil)
 
-	inst, err := p.Create(t.Context(), "workdir", 0)
+	inst, err := p.Create("workdir", 0)
 	assert.Nil(t, err)
 	assert.NotNil(t, inst)
 
@@ -402,13 +401,28 @@ func TestInstance_Forward_Failure(t *testing.T) {
 	assert.Empty(t, remoteAddressToUse)
 }
 
+func TestInstance_Run_SimpleOk(t *testing.T) {
+	mockInstance, inst := createInstanceFixture(t)
+	mockInstance.
+		On("RunStart", mock.Anything, mock.Anything).
+		Return(nil).
+		On("RunReadProgress", mock.Anything, mock.Anything).
+		Return(nil).
+		Maybe()
+
+	outc, errc, err := inst.Run(10*time.Second, make(chan bool), "command")
+	assert.NotNil(t, outc)
+	assert.NotNil(t, errc)
+	assert.Nil(t, err)
+}
+
 func TestInstance_Run_Failure(t *testing.T) {
 	mockInstance, inst := createInstanceFixture(t)
 	mockInstance.
 		On("RunStart", mock.Anything, mock.Anything).
 		Return(fmt.Errorf("run start error"))
 
-	outc, errc, err := inst.Run(contextWithTimeout(t, 10*time.Second), "command")
+	outc, errc, err := inst.Run(10*time.Second, make(chan bool), "command")
 	assert.Nil(t, outc)
 	assert.Nil(t, errc)
 	assert.NotEmpty(t, err)
@@ -424,7 +438,7 @@ func TestInstance_Run_OnTimeout(t *testing.T) {
 		On("RunStop", mock.Anything, mock.Anything).
 		Return(nil)
 
-	_, errc, _ := inst.Run(contextWithTimeout(t, time.Second), "command")
+	_, errc, _ := inst.Run(time.Second, make(chan bool), "command")
 	err := <-errc
 
 	assert.Equal(t, err, vmimpl.ErrTimeout)
@@ -441,9 +455,9 @@ func TestInstance_Run_OnStop(t *testing.T) {
 		On("RunStop", mock.Anything, mock.Anything).
 		Return(nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	_, errc, _ := inst.Run(ctx, "command")
-	cancel()
+	stop := make(chan bool)
+	_, errc, _ := inst.Run(10*time.Second, stop, "command")
+	stop <- true
 	err := <-errc
 	assert.Equal(t, err, vmimpl.ErrTimeout)
 }
@@ -464,7 +478,7 @@ func TestInstance_RunReadProgress_OnErrorReceived(t *testing.T) {
 		Return(nil).
 		Once()
 
-	outc, _, _ := inst.Run(contextWithTimeout(t, 10*time.Second), "command")
+	outc, _, _ := inst.Run(10*time.Second, make(chan bool), "command")
 	output := string(<-outc)
 
 	assert.Equal(t, "mock error\nSYZFAIL: proxy app plugin error\n", output)
@@ -486,7 +500,7 @@ func TestInstance_RunReadProgress_OnFinished(t *testing.T) {
 		Return(nil).
 		Once()
 
-	_, errc, _ := inst.Run(contextWithTimeout(t, 10*time.Second), "command")
+	_, errc, _ := inst.Run(10*time.Second, make(chan bool), "command")
 	err := <-errc
 
 	assert.Equal(t, err, nil)
@@ -505,7 +519,7 @@ func TestInstance_RunReadProgress_Failed(t *testing.T) {
 		Return(fmt.Errorf("runreadprogresserror")).
 		Once()
 
-	outc, _, _ := inst.Run(contextWithTimeout(t, 10*time.Second), "command")
+	outc, _, _ := inst.Run(10*time.Second, make(chan bool), "command")
 	output := string(<-outc)
 
 	assert.Equal(t,
@@ -518,9 +532,3 @@ func TestInstance_RunReadProgress_Failed(t *testing.T) {
 //  [option] check pool size was changed
 
 // TODO: test pool.Close() calls plugin API and return error.
-
-func contextWithTimeout(t *testing.T, timeout time.Duration) context.Context {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	t.Cleanup(cancel)
-	return ctx
-}

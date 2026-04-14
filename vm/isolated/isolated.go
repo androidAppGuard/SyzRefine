@@ -5,7 +5,6 @@ package isolated
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -47,12 +46,15 @@ type Pool struct {
 }
 
 type instance struct {
-	cfg *Config
-	vmimpl.SSHOptions
+	cfg         *Config
 	os          string
+	targetAddr  string
+	targetPort  int
 	index       int
 	closed      chan bool
 	debug       bool
+	sshUser     string
+	sshKey      string
 	forwardPort int
 	timeouts    targets.Timeouts
 }
@@ -92,21 +94,19 @@ func (pool *Pool) Count() int {
 	return len(pool.cfg.Targets)
 }
 
-func (pool *Pool) Create(_ context.Context, workdir string, index int) (vmimpl.Instance, error) {
+func (pool *Pool) Create(workdir string, index int) (vmimpl.Instance, error) {
 	targetAddr, targetPort, _ := splitTargetPort(pool.cfg.Targets[index])
 	inst := &instance{
-		cfg: pool.cfg,
-		os:  pool.env.OS,
-		SSHOptions: vmimpl.SSHOptions{
-			Addr: targetAddr,
-			Port: targetPort,
-			User: pool.env.SSHUser,
-			Key:  pool.env.SSHKey,
-		},
-		index:    index,
-		closed:   make(chan bool),
-		debug:    pool.env.Debug,
-		timeouts: pool.env.Timeouts,
+		cfg:        pool.cfg,
+		os:         pool.env.OS,
+		targetAddr: targetAddr,
+		targetPort: targetPort,
+		index:      index,
+		closed:     make(chan bool),
+		debug:      pool.env.Debug,
+		sshUser:    pool.env.SSHUser,
+		sshKey:     pool.env.SSHKey,
+		timeouts:   pool.env.Timeouts,
 	}
 	closeInst := inst
 	defer func() {
@@ -158,8 +158,8 @@ func (inst *instance) ssh(command string) error {
 	}
 	// TODO(dvyukov): who is closing rpipe?
 
-	args := append(vmimpl.SSHArgs(inst.debug, inst.Key, inst.Port, inst.cfg.SystemSSHCfg),
-		inst.User+"@"+inst.Addr, command)
+	args := append(vmimpl.SSHArgs(inst.debug, inst.sshKey, inst.targetPort, inst.cfg.SystemSSHCfg),
+		inst.sshUser+"@"+inst.targetAddr, command)
 	if inst.debug {
 		log.Logf(0, "running command: ssh %#v", args)
 	}
@@ -255,7 +255,8 @@ func (inst *instance) repair() error {
 }
 
 func (inst *instance) waitForSSH(timeout time.Duration) error {
-	return vmimpl.WaitForSSH(timeout, inst.SSHOptions, inst.os, nil, inst.cfg.SystemSSHCfg, inst.debug)
+	return vmimpl.WaitForSSH(inst.debug, timeout, inst.targetAddr, inst.sshKey, inst.sshUser,
+		inst.os, inst.targetPort, nil, inst.cfg.SystemSSHCfg)
 }
 
 func (inst *instance) waitForReboot(timeout int) error {
@@ -285,8 +286,8 @@ func (inst *instance) Copy(hostSrc string) (string, error) {
 	baseName := filepath.Base(hostSrc)
 	vmDst := filepath.Join(inst.cfg.TargetDir, baseName)
 	inst.ssh("pkill -9 '" + baseName + "'; rm -f '" + vmDst + "'")
-	args := append(vmimpl.SCPArgs(inst.debug, inst.Key, inst.Port, inst.cfg.SystemSSHCfg),
-		hostSrc, inst.User+"@"+inst.Addr+":"+vmDst)
+	args := append(vmimpl.SCPArgs(inst.debug, inst.sshKey, inst.targetPort, inst.cfg.SystemSSHCfg),
+		hostSrc, inst.sshUser+"@"+inst.targetAddr+":"+vmDst)
 	cmd := osutil.Command("scp", args...)
 	if inst.debug {
 		log.Logf(0, "running command: scp %#v", args)
@@ -312,10 +313,10 @@ func (inst *instance) Copy(hostSrc string) (string, error) {
 	return vmDst, nil
 }
 
-func (inst *instance) Run(ctx context.Context, command string) (
+func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command string) (
 	<-chan []byte, <-chan error, error) {
-	args := append(vmimpl.SSHArgs(inst.debug, inst.Key, inst.Port, inst.cfg.SystemSSHCfg),
-		inst.User+"@"+inst.Addr)
+	args := append(vmimpl.SSHArgs(inst.debug, inst.sshKey, inst.targetPort, inst.cfg.SystemSSHCfg),
+		inst.sshUser+"@"+inst.targetAddr)
 	dmesg, err := vmimpl.OpenRemoteConsole("ssh", args...)
 	if err != nil {
 		return nil, nil, err
@@ -327,12 +328,12 @@ func (inst *instance) Run(ctx context.Context, command string) (
 		return nil, nil, err
 	}
 
-	args = vmimpl.SSHArgsForward(inst.debug, inst.Key, inst.Port, inst.forwardPort, inst.cfg.SystemSSHCfg)
+	args = vmimpl.SSHArgsForward(inst.debug, inst.sshKey, inst.targetPort, inst.forwardPort, inst.cfg.SystemSSHCfg)
 	if inst.cfg.Pstore {
 		args = append(args, "-o", "ServerAliveInterval=6")
 		args = append(args, "-o", "ServerAliveCountMax=5")
 	}
-	args = append(args, inst.User+"@"+inst.Addr, "cd "+inst.cfg.TargetDir+" && exec "+command)
+	args = append(args, inst.sshUser+"@"+inst.targetAddr, "cd "+inst.cfg.TargetDir+" && exec "+command)
 	if inst.debug {
 		log.Logf(0, "running command: ssh %#v", args)
 	}
@@ -355,8 +356,9 @@ func (inst *instance) Run(ctx context.Context, command string) (
 	merger.Add("dmesg", dmesg)
 	merger.Add("ssh", rpipe)
 
-	return vmimpl.Multiplex(ctx, cmd, merger, vmimpl.MultiplexConfig{
+	return vmimpl.Multiplex(cmd, merger, timeout, vmimpl.MultiplexConfig{
 		Console: dmesg,
+		Stop:    stop,
 		Close:   inst.closed,
 		Debug:   inst.debug,
 		Scale:   inst.timeouts.Scale,
@@ -365,8 +367,8 @@ func (inst *instance) Run(ctx context.Context, command string) (
 
 func (inst *instance) readPstoreContents() ([]byte, error) {
 	log.Logf(0, "reading pstore contents")
-	args := append(vmimpl.SSHArgs(inst.debug, inst.Key, inst.Port, inst.cfg.SystemSSHCfg),
-		inst.User+"@"+inst.Addr, "cat "+pstoreConsoleFile+" && rm "+pstoreConsoleFile)
+	args := append(vmimpl.SSHArgs(inst.debug, inst.sshKey, inst.targetPort, inst.cfg.SystemSSHCfg),
+		inst.sshUser+"@"+inst.targetAddr, "cat "+pstoreConsoleFile+" && rm "+pstoreConsoleFile)
 	if inst.debug {
 		log.Logf(0, "running command: ssh %#v", args)
 	}

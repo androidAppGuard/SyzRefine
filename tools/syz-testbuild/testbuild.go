@@ -49,9 +49,6 @@ var (
 	flagSyzkaller     = flag.String("syzkaller", ".", "path to built syzkaller")
 	flagSandbox       = flag.String("sandbox", "namespace", "sandbox to use for testing")
 	flagSandboxArg    = flag.Int("sandbox_arg", 0, "an argument for sandbox runner")
-	flagCompiler      = flag.String("compiler", "clang", "compiler to use")
-	flagCompilerType  = flag.String("compiler_type", "clang", "compiler to use")
-	flagLinker        = flag.String("linker", "ld.lld", "linker to use")
 )
 
 const (
@@ -83,21 +80,12 @@ func main() {
 		Procs:      1,
 		Cover:      false,
 		Type:       vmType,
-		VM: json.RawMessage([]byte(fmt.Sprintf(`{"count": %v,
-			"cpu": 2,
-			"mem": 2048,
-			"cmdline": "root=/dev/sda1"}`, numTests))),
+		VM:         json.RawMessage([]byte(fmt.Sprintf(`{ "count": %v, "cpu": 2, "mem": 2048 }`, numTests))),
 		Derived: mgrconfig.Derived{
 			TargetOS:     *flagOS,
 			TargetArch:   *flagArch,
 			TargetVMArch: *flagArch,
 		},
-		Experimental: mgrconfig.Experimental{
-			DescriptionsMode: "manual",
-		},
-	}
-	if err := mgrconfig.SetTargets(cfg); err != nil {
-		tool.Fail(err)
 	}
 	if err := mgrconfig.Complete(cfg); err != nil {
 		tool.Fail(err)
@@ -136,15 +124,16 @@ func main() {
 }
 
 func test(repo vcs.Repo, bisecter vcs.Bisecter, kernelConfig []byte, env instance.Env, com *vcs.Commit) {
-	bisectEnv, err := bisecter.EnvForCommit(*flagCompiler, *flagCompilerType, *flagBisectBin, com.Hash, kernelConfig, nil)
+	compiler, compilerType, linker, ccache := "gcc", "gcc", "ld", ""
+	bisectEnv, err := bisecter.EnvForCommit(compiler, compilerType, *flagBisectBin, com.Hash, kernelConfig, nil)
 	if err != nil {
 		tool.Fail(err)
 	}
 	log.Printf("testing: %v %v using %v", com.Hash, com.Title, bisectEnv.Compiler)
 	buildCfg := &instance.BuildKernelConfig{
 		CompilerBin:  bisectEnv.Compiler,
-		LinkerBin:    *flagLinker,
-		CcacheBin:    "",
+		LinkerBin:    linker,
+		CcacheBin:    ccache,
 		UserspaceDir: *flagUserspace,
 		CmdlineFile:  *flagKernelCmdline,
 		SysctlFile:   *flagKernelSysctl,
@@ -157,7 +146,7 @@ func test(repo vcs.Repo, bisecter vcs.Bisecter, kernelConfig []byte, env instanc
 	if err != nil {
 		var verr *osutil.VerboseError
 		if errors.As(err, &verr) {
-			log.Printf("BUILD BROKEN: %s", verr)
+			log.Printf("BUILD BROKEN: %v", verr.Title)
 			saveLog(com.Hash, 0, verr.Output)
 		} else {
 			log.Printf("BUILD BROKEN: %v", err)

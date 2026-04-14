@@ -8,14 +8,13 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"path/filepath"
 
 	"github.com/google/syzkaller/pkg/instance"
 	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/osutil"
-	"github.com/google/syzkaller/pkg/report"
 	"github.com/google/syzkaller/syz-cluster/pkg/api"
 	"github.com/google/syzkaller/syz-cluster/pkg/app"
-	"github.com/google/syzkaller/syz-cluster/pkg/fuzzconfig"
 )
 
 var (
@@ -72,38 +71,20 @@ func main() {
 	}
 }
 
-// To prevent false positive results, demand that in order to be marked as FAILED,
-// the test must fail 3 times in a row.
-const retryCount = 3
-
-// The base config may have more VMs, but we don't need that many.
-const vmCount = 3
-
 func runTest(ctx context.Context, client *api.Client) (bool, error) {
-	cfg, err := fuzzconfig.GenerateBase(&api.FuzzConfig{})
+	cfg, err := mgrconfig.LoadFile(filepath.Join("/configs", *flagConfig, "base.cfg"))
 	if err != nil {
 		return false, err
 	}
-	if err := instance.OverrideVMCount(cfg, vmCount); err != nil {
-		return false, err
-	}
 	cfg.Workdir = "/tmp/test-workdir"
-	if err := mgrconfig.Complete(cfg); err != nil {
-		return false, fmt.Errorf("failed to complete the config: %w", err)
+	rep, err := instance.RunSmokeTest(cfg)
+	if err != nil {
+		return false, err
+	} else if rep == nil {
+		return true, nil
 	}
 
-	var rep *report.Report
-	for i := 0; i < retryCount; i++ {
-		log.Printf("starting attempt #%d", i)
-		var err error
-		rep, err = instance.RunSmokeTest(cfg)
-		if err != nil {
-			return false, err
-		} else if rep == nil {
-			return true, nil
-		}
-		log.Printf("attempt failed: %q", rep.Title)
-	}
+	log.Printf("found: %q", rep.Title)
 	if *flagFindings {
 		log.Printf("reporting the finding")
 		findingErr := client.UploadFinding(ctx, &api.NewFinding{
@@ -116,9 +97,6 @@ func runTest(ctx context.Context, client *api.Client) (bool, error) {
 		if findingErr != nil {
 			return false, fmt.Errorf("failed to report the finding: %w", findingErr)
 		}
-	} else {
-		log.Printf("report:\n%s", rep.Report)
-		log.Printf("output:\n%s", rep.Output)
 	}
 	return false, nil
 }

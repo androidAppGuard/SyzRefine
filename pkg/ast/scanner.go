@@ -221,11 +221,14 @@ func (s *scanner) scanStr(pos Pos) string {
 		}
 	}
 	lit := string(s.data[pos.Off+1 : s.off])
-	if i := IsValidStringLit(lit); i >= 0 {
-		pos1 := pos
-		pos1.Col += i + 1
-		pos1.Off += i + 1
-		s.Errorf(pos1, "illegal character %#U in string literal %q", lit[i], lit)
+	for i := 0; i < len(lit); i++ {
+		if lit[i] < 0x20 || lit[i] >= 0x80 {
+			pos1 := pos
+			pos1.Col += i + 1
+			pos1.Off += i + 1
+			s.Errorf(pos1, "illegal character %#U in string literal", lit[i])
+			break
+		}
 	}
 	s.next()
 	if closing != '`' {
@@ -348,13 +351,4 @@ func (s *scanner) pos() Pos {
 		Line: s.line,
 		Col:  s.col,
 	}
-}
-
-func IsValidStringLit(lit string) int {
-	for i := 0; i < len(lit); i++ {
-		if lit[i] < 0x20 || lit[i] >= 0x80 {
-			return i
-		}
-	}
-	return -1
 }

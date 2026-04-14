@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"log"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/syzkaller/dashboard/dashapi"
+	"github.com/google/syzkaller/pkg/email"
 	"github.com/google/syzkaller/pkg/email/lore"
 	"github.com/google/syzkaller/pkg/hash"
 	"github.com/google/syzkaller/pkg/osutil"
@@ -27,6 +29,7 @@ import (
 // The syz-lore tool can parse Lore archives and extract syzbot-related conversations from there.
 
 var (
+	flagArchives  = flag.String("archives", "", "path to the folder with git archives")
 	flagEmails    = flag.String("emails", "", "comma-separated list of own emails")
 	flagDomains   = flag.String("domains", "", "comma-separated list of own domains")
 	flagOutDir    = flag.String("out_dir", "", "a directory to save discussions as JSON files")
@@ -38,12 +41,12 @@ var (
 
 func main() {
 	defer tool.Init()()
-	if len(flag.Args()) == 0 {
-		tool.Failf("format: syz-lore [flags] dir1 [dir2 ...]")
+	if !osutil.IsDir(*flagArchives) {
+		tool.Failf("the arhives parameter must be a valid directory")
 	}
 	emails := strings.Split(*flagEmails, ",")
 	domains := strings.Split(*flagDomains, ",")
-	threads := processArchives(flag.Args(), emails, domains)
+	threads := processArchives(*flagArchives, emails, domains)
 	for i, thread := range threads {
 		messages := []dashapi.DiscussionMessage{}
 		for _, m := range thread.Messages {
@@ -99,20 +102,28 @@ func saveDiscussion(d *dashapi.Discussion) error {
 	return nil
 }
 
-func processArchives(paths, emails, domains []string) []*lore.Thread {
+func processArchives(dir string, emails, domains []string) []*lore.Thread {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		tool.Failf("failed to read directory: %v", err)
+	}
 	threads := runtime.NumCPU()
 	messages := make(chan lore.EmailReader, threads*2)
 	wg := sync.WaitGroup{}
 	g, _ := errgroup.WithContext(context.Background())
 
 	// Generate per-email jobs.
-	for _, path := range paths {
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
 		log.Printf("reading %s", path)
 		wg.Add(1)
 		g.Go(func() error {
 			defer wg.Done()
 			repo := vcs.NewLKMLRepo(path)
-			list, err := lore.ReadArchive(repo, "", time.Time{})
+			list, err := lore.ReadArchive(repo, time.Time{})
 			if err != nil {
 				return err
 			}
@@ -124,7 +135,7 @@ func processArchives(paths, emails, domains []string) []*lore.Thread {
 	}
 
 	// Set up some worker threads.
-	var repoEmails []*lore.Email
+	var repoEmails []*email.Email
 	var mu sync.Mutex
 	var skipped atomic.Int64
 	for i := 0; i < threads; i++ {

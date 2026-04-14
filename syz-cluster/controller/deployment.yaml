@@ -21,10 +21,7 @@ spec:
         image: ${IMAGE_PREFIX}controller:${IMAGE_TAG}
         envFrom:
           - configMapRef:
-              name: global-config-env
-        volumeMounts:
-          - name: config-volume
-            mountPath: /config
+              name: global-config
         ports:
         - containerPort: 8080
         resources:
@@ -34,7 +31,3 @@ spec:
           limits:
             cpu: 4
             memory: 16G
-      volumes:
-        - name: config-volume
-          configMap:
-            name: global-config

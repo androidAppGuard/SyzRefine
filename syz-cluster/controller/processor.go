@@ -8,10 +8,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
-	"github.com/google/syzkaller/syz-cluster/pkg/api"
 	"github.com/google/syzkaller/syz-cluster/pkg/app"
 	"github.com/google/syzkaller/syz-cluster/pkg/blob"
 	"github.com/google/syzkaller/syz-cluster/pkg/db"
@@ -20,28 +21,34 @@ import (
 )
 
 type SeriesProcessor struct {
-	blobStorage       blob.Storage
-	seriesRepo        *db.SeriesRepository
-	sessionRepo       *db.SessionRepository
-	sessionTestRepo   *db.SessionTestRepository
-	workflows         workflow.Service
-	dbPollInterval    time.Duration
-	parallelWorkflows int
+	blobStorage     blob.Storage
+	seriesRepo      *db.SeriesRepository
+	sessionRepo     *db.SessionRepository
+	workflows       workflow.Service
+	dbPollInterval  time.Duration
+	parallelWorkers int
 }
 
-func NewSeriesProcessor(env *app.AppEnvironment, cfg *app.AppConfig) *SeriesProcessor {
+func NewSeriesProcessor(env *app.AppEnvironment) *SeriesProcessor {
 	workflows, err := workflow.NewArgoService()
 	if err != nil {
 		app.Fatalf("failed to initialize workflows: %v", err)
 	}
+	parallelWorkers := 1
+	if val := os.Getenv("PARALLEL_WORKERS"); val != "" {
+		var err error
+		parallelWorkers, err = strconv.Atoi(val)
+		if err != nil || parallelWorkers < 1 {
+			app.Fatalf("invalid PARALLEL_WORKERS value")
+		}
+	}
 	return &SeriesProcessor{
-		blobStorage:       env.BlobStorage,
-		seriesRepo:        db.NewSeriesRepository(env.Spanner),
-		sessionRepo:       db.NewSessionRepository(env.Spanner),
-		sessionTestRepo:   db.NewSessionTestRepository(env.Spanner),
-		dbPollInterval:    time.Minute,
-		workflows:         workflows,
-		parallelWorkflows: cfg.ParallelWorkflows,
+		blobStorage:     env.BlobStorage,
+		seriesRepo:      db.NewSeriesRepository(env.Spanner),
+		sessionRepo:     db.NewSessionRepository(env.Spanner),
+		dbPollInterval:  time.Minute,
+		workflows:       workflows,
+		parallelWorkers: parallelWorkers,
 	}
 }
 
@@ -103,7 +110,7 @@ func (sp *SeriesProcessor) seriesRunner(ctx context.Context, ch <-chan *db.Sessi
 	var eg errgroup.Group
 	defer eg.Wait()
 
-	eg.SetLimit(sp.parallelWorkflows)
+	eg.SetLimit(sp.parallelWorkers)
 	for {
 		var session *db.Session
 		select {
@@ -138,7 +145,7 @@ func (sp *SeriesProcessor) handleSession(ctx context.Context, session *db.Sessio
 			app.Errorf("failed to query workflow %q status: %v", session.ID, err)
 			continue
 		}
-		if len(workflowLog) > 0 {
+		if workflowLog != nil {
 			err := sp.updateSessionLog(ctx, session, workflowLog)
 			if err != nil {
 				app.Errorf("failed to update session log: %v", err)
@@ -147,27 +154,18 @@ func (sp *SeriesProcessor) handleSession(ctx context.Context, session *db.Sessio
 		switch status {
 		case workflow.StatusNotFound:
 			log.Printf("scheduling a workflow for %q", session.ID)
-			err := sp.sessionRepo.Start(ctx, session.ID)
-			if err == db.ErrSessionAlreadyStarted {
-				// It may happen if the service was restarted right between the moment we updated the DB
-				// and actually started the workflow.
-				log.Printf("session %q was already marked as started, but there's no actual workflow", session.ID)
-			} else if err != nil {
+			if err := sp.sessionRepo.Start(ctx, session.ID); err != nil {
 				app.Errorf("failed to mark session started: %v", err)
 				break
 			}
-			err = sp.workflows.Start(session.ID)
+			err := sp.workflows.Start(session.ID)
 			if err != nil {
 				app.Errorf("failed to start a workflow: %v", err)
 			}
 		case workflow.StatusFinished, workflow.StatusFailed:
-			log.Printf("workflow for %q completed (status=%q), mark the session finished", session.ID, status)
-			err := sp.stopRunningTests(ctx, session.ID)
-			if err != nil {
-				app.Errorf("failed to check running tests for %s: %v", session.ID, err)
-			}
+			log.Printf("workflow for %q completed, mark the session finished", session.ID)
 			// TODO: StatusFailed needs a different handling.
-			err = sp.sessionRepo.Update(ctx, session.ID, func(session *db.Session) error {
+			err := sp.sessionRepo.Update(ctx, session.ID, func(session *db.Session) error {
 				session.SetFinishedAt(time.Now())
 				return nil
 			})
@@ -186,40 +184,20 @@ func (sp *SeriesProcessor) handleSession(ctx context.Context, session *db.Sessio
 	}
 }
 
-// The session steps are expected to report that they are finished themselves.
-// If the workflow was aborted for some external reason (or the session step crashed/timed out),
-// the step may remain forever in the "Running" state.
-// Go through such steps and mark them as finished (with an error).
-func (sp *SeriesProcessor) stopRunningTests(ctx context.Context, sessionID string) error {
-	tests, err := sp.sessionTestRepo.BySessionRaw(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to query session steps: %w", err)
-	}
-	for _, test := range tests {
-		if test.Result != api.TestRunning {
-			continue
-		}
-		log.Printf("session %q is finished, but the test %q is running: marking it stopped",
-			sessionID, test.TestName)
-		err = sp.sessionTestRepo.InsertOrUpdate(ctx, test, func(entity *db.SessionTest) {
-			if entity.Result == api.TestRunning {
-				entity.Result = api.TestError
-			}
-		})
-		if err != nil {
-			return fmt.Errorf("failed to update the step %q: %w", test.TestName, err)
-		}
-	}
-	return nil
-}
-
 func (sp *SeriesProcessor) updateSessionLog(ctx context.Context, session *db.Session, log []byte) error {
-	logURI, err := sp.blobStorage.Write(bytes.NewReader(log), "Session", session.ID, "log")
-	if err != nil {
-		return fmt.Errorf("failed to save the log: %w", err)
-	}
 	return sp.sessionRepo.Update(ctx, session.ID, func(session *db.Session) error {
-		session.LogURI = logURI
+		if session.LogURI == "" {
+			path, err := sp.blobStorage.Store(bytes.NewReader(log))
+			if err != nil {
+				return fmt.Errorf("failed to save the log: %w", err)
+			}
+			session.LogURI = path
+		} else {
+			err := sp.blobStorage.Update(session.LogURI, bytes.NewReader(log))
+			if err != nil {
+				return fmt.Errorf("failed to update the log %q: %w", session.LogURI, err)
+			}
+		}
 		return nil
 	})
 }

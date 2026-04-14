@@ -9,7 +9,6 @@ import (
 	_ "embed"
 	"fmt"
 	"html/template"
-	"slices"
 	"sort"
 	"strings"
 
@@ -20,15 +19,14 @@ import (
 )
 
 type templateHeatmapRow struct {
-	Items            []*templateHeatmapRow
-	Name             string
-	Coverage         []int64 // in percent
-	Covered          []int64 // in lines count
-	IsDir            bool
-	Depth            int
-	Summary          int64 // right column, may be negative to show drops
-	Tooltips         []string
-	FileCoverageLink []string
+	Items               []*templateHeatmapRow
+	Name                string
+	Coverage            []int64
+	IsDir               bool
+	Depth               int
+	LastDayInstrumented int64
+	Tooltips            []string
+	FileCoverageLink    []string
 
 	builder      map[string]*templateHeatmapRow
 	instrumented map[coveragedb.TimePeriod]int64
@@ -41,43 +39,6 @@ type templateHeatmap struct {
 	Periods    []string
 	Subsystems []string
 	Managers   []string
-}
-
-func (th *templateHeatmap) Filter(pred func(*templateHeatmapRow) bool) {
-	th.Root.filter(pred)
-}
-
-func (th *templateHeatmap) Transform(f func(*templateHeatmapRow)) {
-	th.Root.transform(f)
-}
-
-func (th *templateHeatmap) Sort(pred func(*templateHeatmapRow, *templateHeatmapRow) int) {
-	th.Root.sort(pred)
-}
-
-func (thm *templateHeatmapRow) transform(f func(*templateHeatmapRow)) {
-	for _, item := range thm.Items {
-		item.transform(f)
-	}
-	f(thm)
-}
-
-func (thm *templateHeatmapRow) filter(pred func(*templateHeatmapRow) bool) {
-	var filteredItems []*templateHeatmapRow
-	for _, item := range thm.Items {
-		item.filter(pred)
-		if pred(item) {
-			filteredItems = append(filteredItems, item)
-		}
-	}
-	thm.Items = filteredItems
-}
-
-func (thm *templateHeatmapRow) sort(pred func(*templateHeatmapRow, *templateHeatmapRow) int) {
-	for _, item := range thm.Items {
-		item.sort(pred)
-	}
-	slices.SortFunc(thm.Items, pred)
 }
 
 func (thm *templateHeatmapRow) addParts(depth int, pathLeft []string, filePath string, instrumented, covered int64,
@@ -107,9 +68,18 @@ func (thm *templateHeatmapRow) addParts(depth int, pathLeft []string, filePath s
 	thm.builder[nextElement].addParts(depth+1, pathLeft[1:], filePath, instrumented, covered, timePeriod)
 }
 
-func (thm *templateHeatmapRow) prepareDataFor(pageColumns []pageColumnTarget) {
+func (thm *templateHeatmapRow) prepareDataFor(pageColumns []pageColumnTarget, skipEmpty bool) {
 	for _, item := range thm.builder {
-		thm.Items = append(thm.Items, item)
+		if !skipEmpty {
+			thm.Items = append(thm.Items, item)
+			continue
+		}
+		for _, hitCount := range item.covered {
+			if hitCount > 0 {
+				thm.Items = append(thm.Items, item)
+				break
+			}
+		}
 	}
 	sort.Slice(thm.Items, func(i, j int) bool {
 		if thm.Items[i].IsDir != thm.Items[j].IsDir {
@@ -121,10 +91,9 @@ func (thm *templateHeatmapRow) prepareDataFor(pageColumns []pageColumnTarget) {
 		var dateCoverage int64
 		tp := pageColumn.TimePeriod
 		if thm.instrumented[tp] != 0 {
-			dateCoverage = Percent(thm.covered[tp], thm.instrumented[tp])
+			dateCoverage = percent(thm.covered[tp], thm.instrumented[tp])
 		}
 		thm.Coverage = append(thm.Coverage, dateCoverage)
-		thm.Covered = append(thm.Covered, thm.covered[tp])
 		thm.Tooltips = append(thm.Tooltips, fmt.Sprintf("Instrumented:\t%d blocks\nCovered:\t%d blocks",
 			thm.instrumented[tp], thm.covered[tp]))
 		if !thm.IsDir {
@@ -138,18 +107,10 @@ func (thm *templateHeatmapRow) prepareDataFor(pageColumns []pageColumnTarget) {
 	}
 	if len(pageColumns) > 0 {
 		lastDate := pageColumns[len(pageColumns)-1].TimePeriod
-		thm.Summary = thm.instrumented[lastDate]
+		thm.LastDayInstrumented = thm.instrumented[lastDate]
 	}
 	for _, item := range thm.builder {
-		item.prepareDataFor(pageColumns)
-	}
-}
-
-func (thm *templateHeatmapRow) Visit(v func(string, int64, bool), path ...string) {
-	curPath := append(path, thm.Name)
-	v(strings.Join(curPath, "/"), thm.Summary, thm.IsDir)
-	for _, item := range thm.Items {
-		item.Visit(v, curPath...)
+		item.prepareDataFor(pageColumns, skipEmpty)
 	}
 }
 
@@ -158,7 +119,7 @@ type pageColumnTarget struct {
 	Commit     string
 }
 
-func FilesCoverageToTemplateData(fCov []*coveragedb.FileCoverageWithDetails) *templateHeatmap {
+func filesCoverageToTemplateData(fCov []*coveragedb.FileCoverageWithDetails, hideEmpty bool) *templateHeatmap {
 	res := templateHeatmap{
 		Root: &templateHeatmapRow{
 			IsDir:        true,
@@ -191,7 +152,7 @@ func FilesCoverageToTemplateData(fCov []*coveragedb.FileCoverageWithDetails) *te
 		res.Periods = append(res.Periods, fmt.Sprintf("%s(%d)", tp.DateTo.String(), tp.Days))
 	}
 
-	res.Root.prepareDataFor(targetDateAndCommits)
+	res.Root.prepareDataFor(targetDateAndCommits, hideEmpty)
 	return &res
 }
 
@@ -218,30 +179,22 @@ func stylesBodyJSTemplate(templData *templateHeatmap,
 		template.HTML(js.Bytes()), nil
 }
 
-type Format struct {
-	FilterMinCoveredLinesDrop int
-	OrderByCoveredLinesDrop   bool
-	DropCoveredLines0         bool
-}
-
 func DoHeatMapStyleBodyJS(
 	ctx context.Context, client spannerclient.SpannerClient, scope *coveragedb.SelectScope, onlyUnique bool,
-	sss, managers []string, dataFilters Format) (template.CSS, template.HTML, template.HTML, error) {
+	sss, managers []string) (template.CSS, template.HTML, template.HTML, error) {
 	covAndDates, err := coveragedb.FilesCoverageWithDetails(ctx, client, scope, onlyUnique)
 	if err != nil {
 		return "", "", "", fmt.Errorf("failed to FilesCoverageWithDetails: %w", err)
 	}
-	templData := FilesCoverageToTemplateData(covAndDates)
+	templData := filesCoverageToTemplateData(covAndDates, onlyUnique)
 	templData.Subsystems = sss
 	templData.Managers = managers
-	FormatResult(templData, dataFilters)
-
 	return stylesBodyJSTemplate(templData)
 }
 
 func DoSubsystemsHeatMapStyleBodyJS(
 	ctx context.Context, client spannerclient.SpannerClient, scope *coveragedb.SelectScope, onlyUnique bool,
-	sss, managers []string, format Format) (template.CSS, template.HTML, template.HTML, error) {
+	sss, managers []string) (template.CSS, template.HTML, template.HTML, error) {
 	covWithDetails, err := coveragedb.FilesCoverageWithDetails(ctx, client, scope, onlyUnique)
 	if err != nil {
 		panic(err)
@@ -260,67 +213,18 @@ func DoSubsystemsHeatMapStyleBodyJS(
 			ssCovAndDates = append(ssCovAndDates, &newRecord)
 		}
 	}
-	templData := FilesCoverageToTemplateData(ssCovAndDates)
+	templData := filesCoverageToTemplateData(ssCovAndDates, onlyUnique)
 	templData.Managers = managers
-	FormatResult(templData, format)
 	return stylesBodyJSTemplate(templData)
 }
 
-func FormatResult(thm *templateHeatmap, format Format) {
-	// Remove file coverage lines with drop less than a threshold.
-	if format.FilterMinCoveredLinesDrop > 0 {
-		thm.Filter(func(row *templateHeatmapRow) bool {
-			return row.IsDir ||
-				slices.Max(row.Covered)-row.Covered[len(row.Covered)-1] >= int64(format.FilterMinCoveredLinesDrop)
-		})
-	}
-	// Remove file coverage lines with zero coverage during the analysis period.
-	if format.DropCoveredLines0 {
-		thm.Filter(func(row *templateHeatmapRow) bool {
-			return slices.Max(row.Covered) > 0
-		})
-	}
-	// Drop empty dir elements.
-	thm.Filter(func(row *templateHeatmapRow) bool {
-		return !row.IsDir || len(row.Items) > 0
-	})
-	// The files are sorted lexicographically by default.
-	if format.OrderByCoveredLinesDrop {
-		thm.Sort(func(row1 *templateHeatmapRow, row2 *templateHeatmapRow) int {
-			row1CoveredDrop := slices.Max(row1.Covered) - row1.Covered[len(row1.Covered)-1]
-			row2CoveredDrop := slices.Max(row2.Covered) - row2.Covered[len(row2.Covered)-1]
-			return int(row2CoveredDrop - row1CoveredDrop)
-		})
-		// We want to show the coverage drop numbers instead of total instrumented blocks.
-		thm.Transform(func(row *templateHeatmapRow) {
-			if !row.IsDir {
-				row.Summary = -1 * (slices.Max(row.Covered) - row.Covered[len(row.Covered)-1])
-				return
-			}
-			row.Summary = 0
-			for _, item := range row.Items {
-				if item.Summary < 0 { // only the items with coverage drop
-					row.Summary += item.Summary
-				}
-			}
-		})
-	}
-}
-
 func approximateInstrumented(points int64) string {
-	dim := " "
-	if abs(points) > 10000 {
+	dim := "_"
+	if points > 10000 {
 		dim = "K"
 		points /= 1000
 	}
 	return fmt.Sprintf("%d%s", points, dim)
-}
-
-func abs(a int64) int64 {
-	if a < 0 {
-		return -a
-	}
-	return a
 }
 
 //go:embed templates/heatmap.html

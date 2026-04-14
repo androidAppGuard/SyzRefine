@@ -143,6 +143,8 @@ func readInputs(cfg *mgrconfig.Config, db *db.DB, output chan *input) error {
 	}
 	seedPath := filepath.Join("sys", cfg.TargetOS, "test")
 	seedDir := filepath.Join(cfg.Syzkaller, seedPath)
+	log.Logf(0,"seed Path: %v\n",seedPath)
+	log.Logf(0,"seed Dir: %v\n",seedDir)
 	if osutil.IsExist(seedDir) {
 		seeds, err := os.ReadDir(seedDir)
 		if err != nil {

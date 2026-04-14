@@ -30,15 +30,13 @@ type Menu struct {
 	Elems  []*Menu    // sub-elements for menus
 	Parent *Menu      // parent menu, non-nil for everythign except for mainmenu
 
-	kconf      *KConfig // back-link to the owning KConfig
-	prompts    []prompt
-	defaults   []defaultVal
-	dependsOn  expr
-	visibleIf  expr
-	deps       map[string]bool
-	depsOnce   sync.Once
-	selects    []string
-	selectedBy []string // filled in in setSelectedBy()
+	kconf     *KConfig // back-link to the owning KConfig
+	prompts   []prompt
+	defaults  []defaultVal
+	dependsOn expr
+	visibleIf expr
+	deps      map[string]bool
+	depsOnce  sync.Once
 }
 
 type prompt struct {
@@ -146,7 +144,6 @@ func ParseData(target *targets.Target, data []byte, file string) (*KConfig, erro
 		Configs: make(map[string]*Menu),
 	}
 	kconf.walk(root, nil, nil)
-	kconf.setSelectedBy()
 	return kconf, nil
 }
 
@@ -160,37 +157,6 @@ func (kconf *KConfig) walk(m *Menu, dependsOn, visibleIf expr) {
 	for _, elem := range m.Elems {
 		kconf.walk(elem, m.dependsOn, m.visibleIf)
 	}
-}
-
-// NOTE: the function is ignoring the "if" part of select/imply.
-func (kconf *KConfig) setSelectedBy() {
-	for name, cfg := range kconf.Configs {
-		for _, selectedName := range cfg.selects {
-			selected := kconf.Configs[selectedName]
-			if selected == nil {
-				continue
-			}
-			selected.selectedBy = append(selected.selectedBy, name)
-		}
-	}
-}
-
-// NOTE: the function is ignoring the "if" part of select/imply.
-func (kconf *KConfig) SelectedBy(name string) map[string]bool {
-	ret := map[string]bool{}
-	toVisit := []string{name}
-	for len(toVisit) > 0 {
-		next := kconf.Configs[toVisit[len(toVisit)-1]]
-		toVisit = toVisit[:len(toVisit)-1]
-		if next == nil {
-			continue
-		}
-		for _, selectedBy := range next.selectedBy {
-			ret[selectedBy] = true
-			toVisit = append(toVisit, selectedBy)
-		}
-	}
-	return ret
 }
 
 func (kp *kconfigParser) parseFile() {
@@ -327,8 +293,7 @@ func (kp *kconfigParser) parseProperty(prop string) {
 		kp.MustConsume("if")
 		cur.visibleIf = exprAnd(cur.visibleIf, kp.parseExpr())
 	case "select", "imply":
-		name := kp.Ident()
-		cur.selects = append(cur.selects, name)
+		_ = kp.Ident()
 		if kp.TryConsume("if") {
 			_ = kp.parseExpr()
 		}
@@ -337,10 +302,6 @@ func (kp *kconfigParser) parseProperty(prop string) {
 		kp.ConsumeLine()
 	case "modules":
 	case "optional":
-	// transitional is used for configs backward compatibility.
-	// We can ignore them. After such configs are removed from the kernel, we'll see kconf errors.
-	// https://www.phoronix.com/news/Linux-6.18-Transitional
-	case "transitional":
 	case "default":
 		kp.parseDefaultValue()
 	case "range":
@@ -453,9 +414,9 @@ func (kp *kconfigParser) parseDefaultValue() {
 }
 
 func (kp *kconfigParser) expandString(str string) string {
-	str = strings.ReplaceAll(str, "$(SRCARCH)", kp.target.KernelHeaderArch)
-	str = strings.ReplaceAll(str, "$SRCARCH", kp.target.KernelHeaderArch)
-	str = strings.ReplaceAll(str, "$(KCONFIG_EXT_PREFIX)", "")
-	str = strings.ReplaceAll(str, "$(MALI_KCONFIG_EXT_PREFIX)", "") // ChromeOS.
+	str = strings.Replace(str, "$(SRCARCH)", kp.target.KernelHeaderArch, -1)
+	str = strings.Replace(str, "$SRCARCH", kp.target.KernelHeaderArch, -1)
+	str = strings.Replace(str, "$(KCONFIG_EXT_PREFIX)", "", -1)
+	str = strings.Replace(str, "$(MALI_KCONFIG_EXT_PREFIX)", "", -1) // ChromeOS.
 	return str
 }

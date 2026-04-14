@@ -393,8 +393,7 @@ func (comp *compiler) checkRequiredCallAttrs(call *ast.Call, callAttrNames map[s
 		}
 	}
 
-	switch desc {
-	case typeStruct:
+	if desc == typeStruct {
 		s := comp.structs[t.Ident]
 		// Prune recursion, can happen even on correct tree via opt pointers.
 		if checked[s.Name.Name] {
@@ -405,10 +404,10 @@ func (comp *compiler) checkRequiredCallAttrs(call *ast.Call, callAttrNames map[s
 		for _, fld := range fields {
 			comp.checkRequiredCallAttrs(call, callAttrNames, fld.Type, checked)
 		}
-	case typeArray:
+	} else if desc == typeArray {
 		typ := t.Args[0]
 		comp.checkRequiredCallAttrs(call, callAttrNames, typ, checked)
-	case typePtr:
+	} else if desc == typePtr {
 		typ := t.Args[1]
 		comp.checkRequiredCallAttrs(call, callAttrNames, typ, checked)
 	}
@@ -503,10 +502,9 @@ func (comp *compiler) checkFieldPathsRec(t0, t *ast.Type, parents []parentDesc,
 	_, args, _ := comp.getArgsBase(t, isArg)
 	for i, arg := range args {
 		argDesc := desc.Args[i]
-		switch argDesc.Type {
-		case typeArgLenTarget:
+		if argDesc.Type == typeArgLenTarget {
 			comp.validateFieldPath(arg, t0, t, parents, warned)
-		case typeArgType:
+		} else if argDesc.Type == typeArgType {
 			comp.checkFieldPathsRec(t0, arg, parents, checked, warned, argDesc.IsArg)
 		}
 	}
@@ -874,7 +872,6 @@ func (comp *compiler) checkConstructors() {
 	}
 }
 
-// nolint:revive
 func (comp *compiler) checkTypeCtors(t *ast.Type, dir prog.Dir, isArg, canCreate bool,
 	ctors, inputs map[string]bool, checked map[structDir]bool, neverOutAt *ast.Pos) {
 	desc, args, base := comp.getArgsBase(t, isArg)
@@ -1550,14 +1547,13 @@ func (comp *compiler) checkDupConstsCall(n *ast.Call, dups map[string]map[string
 	constArgID := ""
 	for i, arg := range n.Args {
 		desc := comp.getTypeDesc(arg.Type)
-		switch desc {
-		case typeConst:
+		if desc == typeConst {
 			v := arg.Type.Args[0].Value
 			if v != 0 && v != 18446744073709551516 { // AT_FDCWD
 				constArgID += fmt.Sprintf("(%v-%v)", i, fmt.Sprintf("%v", v))
 				hasConsts = true
 			}
-		case typeResource:
+		} else if desc == typeResource {
 			constArgID += fmt.Sprintf("(%v-%v)", i, arg.Type.Ident)
 		}
 	}

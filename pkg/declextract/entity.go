@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"slices"
-	"strings"
 )
 
 type Output struct {
@@ -25,16 +24,15 @@ type Output struct {
 }
 
 type Function struct {
-	Name      string `json:"name,omitempty"`
-	File      string `json:"file,omitempty"`
-	StartLine int    `json:"start_line,omitempty"`
-	EndLine   int    `json:"end_line,omitempty"`
-	IsStatic  bool   `json:"is_static,omitempty"`
+	Name     string `json:"name,omitempty"`
+	File     string `json:"file,omitempty"`
+	IsStatic bool   `json:"is_static,omitempty"`
 	// Information about function scopes. There is a global scope (with Arg=-1),
 	// and scope for each switch case on the function argument.
 	Scopes []*FunctionScope `json:"scopes,omitempty"`
 
 	callers int
+	calls   []*Function
 	facts   map[string]*typingNode
 }
 
@@ -43,16 +41,10 @@ type FunctionScope struct {
 	Arg int `json:"arg"`
 	// The set of case values for this scope.
 	// It's empt for the global scope for the default case scope.
-	Values    []string      `json:"values,omitempty"`
-	StartLine int           `json:"start_line,omitempty"`
-	EndLine   int           `json:"end_line,omitempty"`
-	Calls     []string      `json:"calls,omitempty"`
-	Facts     []*TypingFact `json:"facts,omitempty"`
-
-	fn            *Function
-	calls         []*Function
-	coveredBlocks int
-	totalBlocks   int
+	Values []string      `json:"values,omitempty"`
+	LOC    int           `json:"loc,omitempty"`
+	Calls  []string      `json:"calls,omitempty"`
+	Facts  []*TypingFact `json:"facts,omitempty"`
 }
 
 type ConstInfo struct {
@@ -89,17 +81,6 @@ type FileOps struct {
 	Mmap       string `json:"mmap,omitempty"`
 	Ioctl      string `json:"ioctl,omitempty"`
 	SourceFile string `json:"source_file,omitempty"`
-
-	*fileOps
-}
-
-type fileOps struct {
-	open  *Function
-	read  *Function
-	write *Function
-	mmap  *Function
-	ioctl *Function
-	ops   []*Function // all non-nil callbacks
 }
 
 type Ioctl struct {
@@ -261,13 +242,6 @@ func (out *Output) SortAndDedup() {
 func (out *Output) SetSourceFile(file string, updatePath func(string) string) {
 	for _, fn := range out.Functions {
 		fn.File = updatePath(fn.File)
-		// To optimize build time kernel/sched compiles a number of source files together
-		// by including them into another source file. As the result static functions
-		// declared in one source file effectively referenced from another source file.
-		// In order to be able to resolve them, we pretend such functions are not static.
-		if strings.HasSuffix(fn.File, ".c") && fn.File != file {
-			fn.IsStatic = false
-		}
 	}
 	for _, ci := range out.Consts {
 		ci.Filename = updatePath(ci.Filename)

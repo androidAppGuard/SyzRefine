@@ -19,7 +19,6 @@ import (
 	"strings"
 
 	"github.com/google/syzkaller/pkg/log"
-	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/osutil"
 	"github.com/google/syzkaller/pkg/symbolizer"
 	"github.com/google/syzkaller/pkg/vminfo"
@@ -28,7 +27,9 @@ import (
 
 type dwarfParams struct {
 	target                *targets.Target
-	kernelDirs            *mgrconfig.KernelDirs
+	objDir                string
+	srcDir                string
+	buildDir              string
 	splitBuildDelimiters  []string
 	moduleObj             []string
 	hostModules           []*vminfo.KernelModule
@@ -82,18 +83,6 @@ var arches = map[string]*Arch{
 			return pc + 4*off
 		},
 	},
-	targets.S390x: {
-		scanSize:      1,
-		callLen:       6,
-		callRelocType: uint64(elf.R_390_PLT32DBL),
-		isCallInsn: func(arch *Arch, insn []byte) bool {
-			return insn[0] == 0xc0 && insn[1] == 0xe5
-		},
-		callTarget: func(arch *Arch, insn []byte, pc uint64) uint64 {
-			off := uint64(int64(int32(binary.BigEndian.Uint32(insn[2:]))))
-			return pc + 2*off
-		},
-	},
 }
 
 func makeDWARF(params *dwarfParams) (impl *Impl, err error) {
@@ -126,7 +115,7 @@ func processModule(params *dwarfParams, module *vminfo.KernelModule, info *symbo
 
 	var data []byte
 	var coverPoints [2][]uint64
-	if _, ok := arches[target.Arch]; !ok {
+	if target.Arch != targets.AMD64 && target.Arch != targets.ARM64 {
 		coverPoints, err = objdump(target, module)
 	} else if module.Name == "" {
 		data, err = params.readTextData(module)
@@ -150,7 +139,9 @@ func processModule(params *dwarfParams, module *vminfo.KernelModule, info *symbo
 
 func makeDWARFUnsafe(params *dwarfParams) (*Impl, error) {
 	target := params.target
-	kernelDirs := params.kernelDirs
+	objDir := params.objDir
+	srcDir := params.srcDir
+	buildDir := params.buildDir
 	splitBuildDelimiters := params.splitBuildDelimiters
 	modules := params.hostModules
 
@@ -240,7 +231,7 @@ func makeDWARFUnsafe(params *dwarfParams) (*Impl, error) {
 			continue // drop the unit
 		}
 		// TODO: objDir won't work for out-of-tree modules.
-		unit.Name, unit.Path = CleanPath(unit.Name, kernelDirs, splitBuildDelimiters)
+		unit.Name, unit.Path = CleanPath(unit.Name, objDir, srcDir, buildDir, splitBuildDelimiters)
 		allUnits[nunit] = unit
 		nunit++
 	}
@@ -253,7 +244,7 @@ func makeDWARFUnsafe(params *dwarfParams) (*Impl, error) {
 		Units:   allUnits,
 		Symbols: allSymbols,
 		Symbolize: func(pcs map[*vminfo.KernelModule][]uint64) ([]*Frame, error) {
-			return symbolize(target, &interner, kernelDirs, splitBuildDelimiters, pcs)
+			return symbolize(target, &interner, objDir, srcDir, buildDir, splitBuildDelimiters, pcs)
 		},
 		CallbackPoints:  allCoverPoints[0],
 		PreciseCoverage: preciseCoverage,
@@ -353,7 +344,6 @@ type symbolInfo struct {
 }
 
 type pcRange struct {
-	// [start; end)
 	start uint64
 	end   uint64
 	unit  *CompileUnit
@@ -364,32 +354,7 @@ type pcFixFn = (func([2]uint64) ([2]uint64, bool))
 func readTextRanges(debugInfo *dwarf.Data, module *vminfo.KernelModule, pcFix pcFixFn) (
 	[]pcRange, []*CompileUnit, error) {
 	var ranges []pcRange
-	unitMap := map[string]*CompileUnit{}
-	addRange := func(r [2]uint64, fileName string) {
-		if pcFix != nil {
-			var filtered bool
-			r, filtered = pcFix(r)
-			if filtered {
-				return
-			}
-		}
-		unit, ok := unitMap[fileName]
-		if !ok {
-			unit = &CompileUnit{
-				ObjectUnit: ObjectUnit{
-					Name: fileName,
-				},
-				Module: module,
-			}
-			unitMap[fileName] = unit
-		}
-		if module.Name == "" {
-			ranges = append(ranges, pcRange{r[0], r[1], unit})
-		} else {
-			ranges = append(ranges, pcRange{r[0] + module.Addr, r[1] + module.Addr, unit})
-		}
-	}
-
+	var units []*CompileUnit
 	for r := debugInfo.Reader(); ; {
 		ent, err := r.Next()
 		if err != nil {
@@ -401,101 +366,42 @@ func readTextRanges(debugInfo *dwarf.Data, module *vminfo.KernelModule, pcFix pc
 		if ent.Tag != dwarf.TagCompileUnit {
 			return nil, nil, fmt.Errorf("found unexpected tag %v on top level", ent.Tag)
 		}
-		attrName, ok := ent.Val(dwarf.AttrName).(string)
-		if !ok {
+		attrName := ent.Val(dwarf.AttrName)
+		if attrName == nil {
 			continue
 		}
-		attrCompDir, _ := ent.Val(dwarf.AttrCompDir).(string)
+		unit := &CompileUnit{
+			ObjectUnit: ObjectUnit{
+				Name: attrName.(string),
+			},
+			Module: module,
+		}
+		units = append(units, unit)
+		ranges1, err := debugInfo.Ranges(ent)
+		if err != nil {
+			return nil, nil, err
+		}
 
-		const languageRust = 28
-		if language, ok := ent.Val(dwarf.AttrLanguage).(int64); ok && language == languageRust {
-			rawRanges, err := rustRanges(debugInfo, ent)
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed to query Rust PC ranges: %w", err)
+		var filtered bool
+		for _, r := range ranges1 {
+			if pcFix != nil {
+				r, filtered = pcFix(r)
+				if filtered {
+					continue
+				}
 			}
-			for _, r := range rawRanges {
-				addRange([2]uint64{r.start, r.end}, r.file)
-			}
-		} else {
-			// Compile unit names are relative to the compilation dir,
-			// while per-line info isn't.
-			// attrName could be an absolute path for out-of-tree modules.
-			unitName := attrName
-			if !filepath.IsAbs(attrName) {
-				unitName = filepath.Join(attrCompDir, attrName)
-			}
-			ranges1, err := debugInfo.Ranges(ent)
-			if err != nil {
-				return nil, nil, err
-			}
-			for _, r := range ranges1 {
-				addRange(r, unitName)
+			if module.Name == "" {
+				ranges = append(ranges, pcRange{r[0], r[1], unit})
+			} else {
+				ranges = append(ranges, pcRange{r[0] + module.Addr, r[1] + module.Addr, unit})
 			}
 		}
 		r.SkipChildren()
 	}
-	var units []*CompileUnit
-	for _, unit := range unitMap {
-		units = append(units, unit)
-	}
 	return ranges, units, nil
 }
 
-type rustRange struct {
-	// [start; end)
-	start uint64
-	end   uint64
-	file  string
-}
-
-func rustRanges(debugInfo *dwarf.Data, ent *dwarf.Entry) ([]rustRange, error) {
-	// For Rust, a single compilation unit may comprise all .rs files that belong to the crate.
-	// To properly render the coverage, we need to somehow infer the ranges that belong to
-	// those individual .rs files.
-	// For simplicity, let's create fake ranges by looking at the DWARF line information.
-	var ret []rustRange
-	lr, err := debugInfo.LineReader(ent)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query line reader: %w", err)
-	}
-	var startPC uint64
-	var files []string
-	for {
-		var entry dwarf.LineEntry
-		if err = lr.Next(&entry); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil, fmt.Errorf("failed to parse next line entry: %w", err)
-		}
-		if startPC == 0 || entry.Address != startPC {
-			for _, file := range files {
-				ret = append(ret, rustRange{
-					start: startPC,
-					end:   entry.Address,
-					file:  file,
-				})
-			}
-			files = files[:0]
-			startPC = entry.Address
-		}
-		// Keep on collecting file names that are covered by the range.
-		files = append(files, entry.File.Name)
-	}
-	if startPC != 0 {
-		// We don't know the end PC for these, but let's still add them to the ranges.
-		for _, file := range files {
-			ret = append(ret, rustRange{
-				start: startPC,
-				end:   startPC + 1,
-				file:  file,
-			})
-		}
-	}
-	return ret, nil
-}
-
-func symbolizeModule(target *targets.Target, interner *symbolizer.Interner, kernelDirs *mgrconfig.KernelDirs,
+func symbolizeModule(target *targets.Target, interner *symbolizer.Interner, objDir, srcDir, buildDir string,
 	splitBuildDelimiters []string, mod *vminfo.KernelModule, pcs []uint64) ([]*Frame, error) {
 	procs := min(runtime.GOMAXPROCS(0)/2, len(pcs)/1000)
 	const (
@@ -547,7 +453,7 @@ func symbolizeModule(target *targets.Target, interner *symbolizer.Interner, kern
 			err0 = res.err
 		}
 		for _, frame := range res.frames {
-			name, path := CleanPath(frame.File, kernelDirs, splitBuildDelimiters)
+			name, path := CleanPath(frame.File, objDir, srcDir, buildDir, splitBuildDelimiters)
 			pc := frame.PC
 			if mod.Name != "" {
 				pc = frame.PC + mod.Addr
@@ -574,7 +480,7 @@ func symbolizeModule(target *targets.Target, interner *symbolizer.Interner, kern
 	return frames, nil
 }
 
-func symbolize(target *targets.Target, interner *symbolizer.Interner, kernelDirs *mgrconfig.KernelDirs,
+func symbolize(target *targets.Target, interner *symbolizer.Interner, objDir, srcDir, buildDir string,
 	splitBuildDelimiters []string, pcs map[*vminfo.KernelModule][]uint64) ([]*Frame, error) {
 	var frames []*Frame
 	type frameResult struct {
@@ -584,7 +490,7 @@ func symbolize(target *targets.Target, interner *symbolizer.Interner, kernelDirs
 	frameC := make(chan frameResult, len(pcs))
 	for mod, pcs1 := range pcs {
 		go func(mod *vminfo.KernelModule, pcs []uint64) {
-			frames, err := symbolizeModule(target, interner, kernelDirs, splitBuildDelimiters, mod, pcs)
+			frames, err := symbolizeModule(target, interner, objDir, srcDir, buildDir, splitBuildDelimiters, mod, pcs)
 			frameC <- frameResult{frames: frames, err: err}
 		}(mod, pcs1)
 	}
@@ -679,27 +585,27 @@ func cleanPathAndroid(path, srcDir string, delimiters []string, existFn func(str
 	return "", ""
 }
 
-func CleanPath(path string, kernelDirs *mgrconfig.KernelDirs, splitBuildDelimiters []string) (string, string) {
+func CleanPath(path, objDir, srcDir, buildDir string, splitBuildDelimiters []string) (string, string) {
 	filename := ""
 
 	path = filepath.Clean(path)
-	aname, apath := cleanPathAndroid(path, kernelDirs.Src, splitBuildDelimiters, osutil.IsExist)
+	aname, apath := cleanPathAndroid(path, srcDir, splitBuildDelimiters, osutil.IsExist)
 	if aname != "" {
 		return aname, apath
 	}
 	absPath := osutil.Abs(path)
 	switch {
-	case strings.HasPrefix(absPath, kernelDirs.Obj):
+	case strings.HasPrefix(absPath, objDir):
 		// Assume the file was built there.
-		path = strings.TrimPrefix(absPath, kernelDirs.Obj)
-		filename = filepath.Join(kernelDirs.Obj, path)
-	case strings.HasPrefix(absPath, kernelDirs.BuildSrc):
+		path = strings.TrimPrefix(absPath, objDir)
+		filename = filepath.Join(objDir, path)
+	case strings.HasPrefix(absPath, buildDir):
 		// Assume the file was moved from buildDir to srcDir.
-		path = strings.TrimPrefix(absPath, kernelDirs.BuildSrc)
-		filename = filepath.Join(kernelDirs.Src, path)
+		path = strings.TrimPrefix(absPath, buildDir)
+		filename = filepath.Join(srcDir, path)
 	default:
 		// Assume this is relative path.
-		filename = filepath.Join(kernelDirs.Src, path)
+		filename = filepath.Join(srcDir, path)
 	}
 	return strings.TrimLeft(filepath.Clean(path), "/\\"), filename
 }
@@ -731,10 +637,7 @@ func objdump(target *targets.Target, mod *vminfo.KernelModule) ([2][]uint64, err
 	callInsns, traceFuncs := archCallInsn(target)
 	for s.Scan() {
 		if pc := parseLine(callInsns, traceFuncs, s.Bytes()); pc != 0 {
-			if mod.Name != "" {
-				pc = pc + mod.Addr
-			}
-			pcs[0] = append(pcs[0], pc)
+			pcs[0] = append(pcs[0], pc+mod.Addr)
 		}
 	}
 	stderrOut, _ := io.ReadAll(stderr)

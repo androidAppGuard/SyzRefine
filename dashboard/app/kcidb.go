@@ -32,7 +32,7 @@ func handleKcidbPoll(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleKcidbNamespce(c context.Context, ns string, cfg *KcidbConfig) error {
-	client, err := kcidb.NewClient(c, cfg.Origin, cfg.RestURI, cfg.Token)
+	client, err := kcidb.NewClient(c, cfg.Origin, cfg.Project, cfg.Topic, cfg.Credentials)
 	if err != nil {
 		return err
 	}
@@ -69,11 +69,13 @@ func publishKcidbBug(c context.Context, client *kcidb.Client, bug *Bug, bugKey *
 	if err != nil {
 		return false, err
 	}
-	// publish == false happens only for syzkaller build/test errors.
-	// But if this ever happens for a kernel bug, then we also don't want to publish such bugs
-	// with missing critical info.
-	publish := rep.KernelCommit != "" && len(rep.KernelConfig) != 0
-
+	publish := true
+	if rep.KernelCommit == "" || len(rep.KernelConfig) == 0 {
+		// This should happen only for syzkaller build/test errors, which we don't want to publish.
+		// But if this ever happens for a kernel bug, then we also don't want to publish such bugs
+		// with missing critical info.
+		publish = false
+	}
 	if publish {
 		if err := client.Publish(rep); err != nil {
 			return false, err

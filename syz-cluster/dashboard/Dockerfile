@@ -1,4 +1,4 @@
-FROM golang:1.24-alpine AS dashboard-builder
+FROM golang:1.23-alpine AS dashboard-builder
 
 WORKDIR /build
 
@@ -7,7 +7,6 @@ COPY go.mod ./
 COPY go.sum ./
 RUN go mod download
 COPY pkg/gcs/ pkg/gcs/
-COPY pkg/html/urlutil/ pkg/html/urlutil/
 
 # Build the tool.
 COPY syz-cluster/dashboard/ syz-cluster/dashboard/

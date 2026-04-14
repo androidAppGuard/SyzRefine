@@ -23,6 +23,7 @@ func (p *Prog) cloneWithMap(newargs map[*ResultArg]*ResultArg) *Prog {
 	p1 := &Prog{
 		Target: p.Target,
 		Calls:  cloneCalls(p.Calls, newargs),
+		Progtype: p.Progtype,
 	}
 	p1.debugValidate()
 	return p1
@@ -47,6 +48,7 @@ func cloneCall(c *Call, newargs map[*ResultArg]*ResultArg) *Call {
 		c1.Args[ai] = clone(arg, newargs)
 	}
 	c1.Props = c.Props
+	c1.Errno = c.Errno
 	return c1
 }
 

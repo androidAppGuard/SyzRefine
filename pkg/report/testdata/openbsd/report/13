@@ -1,5 +1,4 @@
 TITLE: panic: timeout_add: to_ticks < NUM
-TYPE: DoS
 
 login: panic: timeout_add: to_ticks (-3) < 0
 Stopped at      db_enter+0x18:  addq    $0x8,%rsp

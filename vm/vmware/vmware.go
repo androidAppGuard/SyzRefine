@@ -4,7 +4,6 @@
 package vmware
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net"
@@ -77,7 +76,7 @@ func (pool *Pool) Count() int {
 	return pool.cfg.Count
 }
 
-func (pool *Pool) Create(_ context.Context, workdir string, index int) (vmimpl.Instance, error) {
+func (pool *Pool) Create(workdir string, index int) (vmimpl.Instance, error) {
 	createTime := strconv.FormatInt(time.Now().UnixNano(), 10)
 	vmx := filepath.Join(workdir, createTime, "syzkaller.vmx")
 	sshkey := pool.env.SSHKey
@@ -174,7 +173,7 @@ func (inst *instance) Copy(hostSrc string) (string, error) {
 	return vmDst, nil
 }
 
-func (inst *instance) Run(ctx context.Context, command string) (
+func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command string) (
 	<-chan []byte, <-chan error, error) {
 	vmxDir := filepath.Dir(inst.vmx)
 	serial := filepath.Join(vmxDir, "serial")
@@ -218,8 +217,9 @@ func (inst *instance) Run(ctx context.Context, command string) (
 	merger.Add("dmesg", dmesg)
 	merger.Add("ssh", rpipe)
 
-	return vmimpl.Multiplex(ctx, cmd, merger, vmimpl.MultiplexConfig{
+	return vmimpl.Multiplex(cmd, merger, timeout, vmimpl.MultiplexConfig{
 		Console: dmesg,
+		Stop:    stop,
 		Close:   inst.closed,
 		Debug:   inst.debug,
 		Scale:   inst.timeouts.Scale,

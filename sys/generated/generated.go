@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"path/filepath"
 
+	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/prog"
 	"github.com/google/syzkaller/sys/targets"
 )
@@ -36,12 +37,14 @@ func Register(os, arch, revision string, init func(*prog.Target), files embed.FS
 		BigEndian:  sysTarget.BigEndian,
 	}
 	filler := func(target *prog.Target) {
+		// Annotation: fill the system calls
 		fill(target, files)
 	}
 	prog.RegisterTarget(target, filler, init)
 }
 
 func fill(target *prog.Target, files embed.FS) {
+	log.Logf(0, "specification file: %v\n", FileName(target.OS, target.Arch))
 	data, err := files.ReadFile(FileName(target.OS, target.Arch))
 	if err != nil {
 		panic(err)

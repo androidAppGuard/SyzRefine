@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/google/syzkaller/pkg/ifuzz"
+	"github.com/google/syzkaller/pkg/log"
 )
 
 const (
@@ -21,10 +22,6 @@ const (
 	// "Recommended" max number of calls in programs.
 	// If we receive longer programs from hub/corpus we discard them.
 	MaxCalls = 40
-	// "Recommended" number of calls in KFuzzTest mode. These targets test the behavior
-	// of internal kernel functions rather than system behavior, and for this reason
-	// it is more sensible to generate a smaller number of calls instead of long chains.
-	RecommendedCallsKFuzzTest = 5
 )
 
 type randGen struct {
@@ -32,7 +29,6 @@ type randGen struct {
 	target                *Target
 	inGenerateResource    bool
 	patchConditionalDepth int
-	genKFuzzTest          bool
 	recDepth              map[string]int
 }
 
@@ -359,9 +355,7 @@ func (r *randGen) randString(s *state, t *BufferType) []byte {
 			buf.Write([]byte{byte(r.Intn(256))})
 		}
 	}
-	// We always null-terminate strings that are inputs to KFuzzTest calls to
-	// avoid false-positive buffer overflow reports.
-	if r.oneOf(100) == t.NoZ || r.genKFuzzTest {
+	if r.oneOf(100) == t.NoZ {
 		buf.Write([]byte{0})
 	}
 	return buf.Bytes()
@@ -610,26 +604,40 @@ func (r *randGen) generateCall(s *state, p *Prog, insertionPoint int) []*Call {
 
 func (r *randGen) generateParticularCall(s *state, meta *Syscall) (calls []*Call) {
 	if meta.Attrs.Disabled {
-		panic(fmt.Sprintf("generating disabled call %v", meta.Name))
+		// panic(fmt.Sprintf("generating disabled call %v", meta.Name))
+		log.Logf(0, "generating disabled call %v", meta.Name)
+		return []*Call{}
 	}
 	if meta.Attrs.NoGenerate {
-		panic(fmt.Sprintf("generating no_generate call: %v", meta.Name))
+		// panic(fmt.Sprintf("generating no_generate call: %v", meta.Name))
+		log.Logf(0, "generating no_generate call: %v", meta.Name)
+		return []*Call{}
 	}
 	c := MakeCall(meta, nil)
-	// KFuzzTest calls restrict mutation and generation. Since calls to
-	// generateParticularCall can be recursive, we save the previous value, and
-	// set it true.
-	if c.Meta.Attrs.KFuzzTest {
-		tmp := r.genKFuzzTest
-		r.genKFuzzTest = true
-		defer func() {
-			r.genKFuzzTest = tmp
-		}()
-	}
 	c.Args, calls = r.generateArgs(s, meta.Args, DirIn)
 	moreCalls, _ := r.patchConditionalFields(c, s)
 	r.target.assignSizesCall(c)
 	return append(append(calls, moreCalls...), c)
+}
+
+func TestSpecification(rs rand.Source, target *Target, enableCalls map[*Syscall]bool, ct *ChoiceTable) []*Prog {
+	programs := []*Prog{}
+	r := newRand(target, rs)
+
+	// testing which is correct specification
+	for syscall, _ := range enableCalls {
+		if syscall.Attrs.Disabled || syscall.Attrs.NoGenerate {
+			continue
+		}
+		p := &Prog{
+			Target: target,
+		}
+		s := newState(target, ct, nil)
+		calls := r.generateParticularCall(s, syscall)
+		p.Calls = append(p.Calls, calls...)
+		programs = append(programs, p)
+	}
+	return programs
 }
 
 // GenerateAllSyzProg generates a program that contains all pseudo syz_ calls for testing.

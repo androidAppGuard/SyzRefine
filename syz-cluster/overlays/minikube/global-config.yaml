@@ -6,18 +6,9 @@ kind: ConfigMap
 metadata:
   name: global-config
 data:
-  config.yaml: |
-    URL: http://localhost
-    parallelWorkflows: 1
-    # Whatever, it's just for debugging.
-    loreArchives:
-      - linux-wireless
-    emailReporting:
-      name: test-name
-      docs: http://docs/
-      sender: smtp
-      supportEmail: name@email.com
-      archiveList: archive@list.com
-      moderationList: moderation@list.com
-      smtpConfig:
-        from: sender@email.com
+  SPANNER_EMULATOR_HOST: "cloud-spanner-emulator:9010"
+  SPANNER_DATABASE_URI: "projects/my-project/instances/my-instance/databases/db"
+  STORAGE_EMULATOR_HOST: "http://fake-gcs-server.default.svc.cluster.local:4443"
+  BLOB_STORAGE_GCS_BUCKET: "blobs" # Initialized in fake-gcs.yaml
+  PARALLEL_WORKERS: "1" # Process only one series at a time.
+  LORE_ARCHIVES_TO_POLL: "linux-wireless" # Whatever, it's just for debugging.

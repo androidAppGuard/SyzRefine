@@ -9,6 +9,7 @@ import (
 
 	"cloud.google.com/go/spanner"
 	"github.com/google/uuid"
+	"google.golang.org/api/iterator"
 )
 
 type FindingRepository struct {
@@ -27,86 +28,49 @@ func NewFindingRepository(client *spanner.Client) *FindingRepository {
 	}
 }
 
-type FindingID struct {
-	SessionID string
-	TestName  string
-	Title     string
-}
+var ErrFindingExists = errors.New("the finding already exists")
 
-// Store queries the information about the session and the existing finding and then
-// requests a new Finding object to replace the old one.
-// If the callback returns nil, nothing it updated.
-func (repo *FindingRepository) Store(ctx context.Context, id *FindingID,
-	cb func(session *Session, old *Finding) (*Finding, error)) error {
+// Save either adds the finding to the database or returns ErrFindingExists.
+func (repo *FindingRepository) Save(ctx context.Context, finding *Finding) error {
+	if finding.ID == "" {
+		finding.ID = uuid.NewString()
+	}
 	_, err := repo.client.ReadWriteTransaction(ctx,
 		func(ctx context.Context, txn *spanner.ReadWriteTransaction) error {
-			// Query the existing finding, if it exists.
-			oldFinding, err := readEntity[Finding](ctx, txn, spanner.Statement{
+			// Check if there is still no such finding.
+			stmt := spanner.Statement{
 				SQL: "SELECT * from `Findings` WHERE `SessionID`=@sessionID " +
 					"AND `TestName` = @testName AND `Title`=@title",
 				Params: map[string]interface{}{
-					"sessionID": id.SessionID,
-					"testName":  id.TestName,
-					"title":     id.Title,
+					"sessionID": finding.SessionID,
+					"testName":  finding.TestName,
+					"title":     finding.Title,
 				},
-			})
-			if err != nil {
-				return err
 			}
-			// Query the Session object.
-			session, err := readEntity[Session](ctx, txn, spanner.Statement{
-				SQL:    "SELECT * FROM `Sessions` WHERE `ID`=@id",
-				Params: map[string]interface{}{"id": id.SessionID},
-			})
-			if err != nil {
-				return err
+			iter := txn.Query(ctx, stmt)
+			defer iter.Stop()
+			_, iterErr := iter.Next()
+			if iterErr == nil {
+				return ErrFindingExists
+			} else if iterErr != iterator.Done {
+				return iterErr
 			}
-			// Query the callback.
-			finding, err := cb(session, oldFinding)
-			if err != nil {
-				return err
-			} else if finding == nil {
-				return nil // Just abort.
-			} else if finding.ID == "" {
-				finding.ID = uuid.NewString()
-			}
-			// Insert the finding.
 			m, err := spanner.InsertStruct("Findings", finding)
 			if err != nil {
 				return err
 			}
-			var mutations []*spanner.Mutation
-			if oldFinding != nil {
-				mutations = append(mutations, spanner.Delete("Findings", spanner.Key{oldFinding.ID}))
-			}
-			mutations = append(mutations, m)
-			return txn.BufferWrite(mutations)
+			return txn.BufferWrite([]*spanner.Mutation{m})
 		})
 	return err
 }
 
-var errFindingExists = errors.New("the finding already exists")
-
-// A helper for tests.
-func (repo *FindingRepository) mustStore(ctx context.Context, finding *Finding) error {
-	return repo.Store(ctx, &FindingID{
-		SessionID: finding.SessionID,
-		TestName:  finding.TestName,
-		Title:     finding.Title,
-	}, func(_ *Session, old *Finding) (*Finding, error) {
-		if old != nil {
-			return nil, errFindingExists
-		}
-		return finding, nil
-	})
-}
-
 // nolint: dupl
-func (repo *FindingRepository) ListForSession(ctx context.Context, sessionID string, limit int) ([]*Finding, error) {
+func (repo *FindingRepository) ListForSession(ctx context.Context, sessionID string) ([]*Finding, error) {
 	stmt := spanner.Statement{
 		SQL:    "SELECT * FROM `Findings` WHERE `SessionID` = @session ORDER BY `TestName`, `Title`",
 		Params: map[string]interface{}{"session": sessionID},
 	}
-	addLimit(&stmt, limit)
-	return repo.readEntities(ctx, stmt)
+	iter := repo.client.Single().Query(ctx, stmt)
+	defer iter.Stop()
+	return readEntities[Finding](iter)
 }

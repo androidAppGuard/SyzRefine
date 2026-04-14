@@ -29,7 +29,6 @@ import (
 	"github.com/google/syzkaller/pkg/html/pages"
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/mgrconfig"
-	"github.com/google/syzkaller/pkg/report"
 	"github.com/google/syzkaller/pkg/stat"
 	"github.com/google/syzkaller/pkg/vcs"
 	"github.com/google/syzkaller/pkg/vminfo"
@@ -356,33 +355,17 @@ func makeUICrashType(info *BugInfo, startTime time.Time, repros map[string]bool)
 	triaged := reproStatus(info.HasRepro, info.HasCRepro, repros[info.Title],
 		info.ReproAttempts >= MaxReproAttempts)
 	return UICrashType{
-		BugInfo:     *info,
-		RankTooltip: higherRankTooltip(info.Title, info.TailTitles),
+		Description: info.Title,
+		FirstTime:   info.FirstTime,
+		LastTime:    info.LastTime,
 		New:         info.FirstTime.After(startTime),
 		Active:      info.LastTime.After(startTime),
+		ID:          info.ID,
+		Count:       len(info.Crashes),
 		Triaged:     triaged,
+		Strace:      info.StraceFile,
 		Crashes:     crashes,
 	}
-}
-
-// higherRankTooltip generates the prioritized list of the titles with higher Rank
-// than the firstTitle has.
-func higherRankTooltip(firstTitle string, titlesInfo []*report.TitleFreqRank) string {
-	baseRank := report.TitlesToImpact(firstTitle)
-	res := ""
-	for _, ti := range titlesInfo {
-		if ti.Rank <= baseRank {
-			continue
-		}
-		res += fmt.Sprintf("[rank %2v, freq %5.1f%%] %s\n",
-			ti.Rank,
-			100*float32(ti.Count)/float32(ti.Total),
-			ti.Title)
-	}
-	if res != "" {
-		return fmt.Sprintf("[rank %2v,  originally] %s\n%s", baseRank, firstTitle, res)
-	}
-	return res
 }
 
 var crashIDRe = regexp.MustCompile(`^\w+$`)
@@ -539,7 +522,7 @@ func (serv *HTTPServer) httpCoverCover(w http.ResponseWriter, r *http.Request, f
 		}()
 	}
 
-	var progs []coverProgRaw
+	var progs []cover.Prog
 	if sig := r.FormValue("input"); sig != "" {
 		inp := corpus.Item(sig)
 		if inp == nil {
@@ -552,16 +535,16 @@ func (serv *HTTPServer) httpCoverCover(w http.ResponseWriter, r *http.Request, f
 				http.Error(w, "bad call_id", http.StatusBadRequest)
 				return
 			}
-			progs = append(progs, coverProgRaw{
-				sig:  sig,
-				prog: inp.Prog,
-				pcs:  CoverToPCs(serv.Cfg, inp.Updates[updateID].RawCover),
+			progs = append(progs, cover.Prog{
+				Sig:  sig,
+				Data: string(inp.Prog.Serialize()),
+				PCs:  CoverToPCs(serv.Cfg, inp.Updates[updateID].RawCover),
 			})
 		} else {
-			progs = append(progs, coverProgRaw{
-				sig:  sig,
-				prog: inp.Prog,
-				pcs:  CoverToPCs(serv.Cfg, inp.Cover),
+			progs = append(progs, cover.Prog{
+				Sig:  sig,
+				Data: string(inp.Prog.Serialize()),
+				PCs:  CoverToPCs(serv.Cfg, inp.Cover),
 			})
 		}
 	} else {
@@ -570,10 +553,10 @@ func (serv *HTTPServer) httpCoverCover(w http.ResponseWriter, r *http.Request, f
 			if call != "" && call != inp.StringCall() {
 				continue
 			}
-			progs = append(progs, coverProgRaw{
-				sig:  inp.Sig,
-				prog: inp.Prog,
-				pcs:  CoverToPCs(serv.Cfg, inp.Cover),
+			progs = append(progs, cover.Prog{
+				Sig:  inp.Sig,
+				Data: string(inp.Prog.Serialize()),
+				PCs:  CoverToPCs(serv.Cfg, inp.Cover),
 			})
 		}
 	}
@@ -588,7 +571,7 @@ func (serv *HTTPServer) httpCoverCover(w http.ResponseWriter, r *http.Request, f
 	}
 
 	params := cover.HandlerParams{
-		Progs:  serv.serializeCoverProgs(progs),
+		Progs:  progs,
 		Filter: coverFilter,
 		Debug:  r.FormValue("debug") != "",
 		Force:  r.FormValue("force") != "",
@@ -618,44 +601,6 @@ func (serv *HTTPServer) httpCoverCover(w http.ResponseWriter, r *http.Request, f
 	if err := flagToFunc[funcFlag].Do(w, params); err != nil {
 		http.Error(w, fmt.Sprintf("failed to generate coverage profile: %v", err), http.StatusInternalServerError)
 		return
-	}
-}
-
-type coverProgRaw struct {
-	sig  string
-	prog *prog.Prog
-	pcs  []uint64
-}
-
-// Once the total size of corpus programs exceeds 100MB, skip fs images from it.
-const compactProgsCutOff = 100 * 1000 * 1000
-
-func (serv *HTTPServer) serializeCoverProgs(rawProgs []coverProgRaw) []cover.Prog {
-	skipImages := false
-outerLoop:
-	for {
-		var flags []prog.SerializeFlag
-		if skipImages {
-			flags = append(flags, prog.SkipImages)
-		}
-		totalSize := 0
-		var ret []cover.Prog
-		for _, item := range rawProgs {
-			prog := cover.Prog{
-				Sig:  item.sig,
-				Data: string(item.prog.Serialize(flags...)),
-				PCs:  item.pcs,
-			}
-			totalSize += len(prog.Data)
-			if totalSize > compactProgsCutOff && !skipImages {
-				log.Logf(0, "total size of corpus programs is too big, "+
-					"full fs image won't be included in the cover reports")
-				skipImages = true
-				continue outerLoop
-			}
-			ret = append(ret, prog)
-		}
-		return ret
 	}
 }
 
@@ -722,22 +667,14 @@ func (serv *HTTPServer) httpPrio(w http.ResponseWriter, r *http.Request) {
 		progs = append(progs, inp.Prog)
 	}
 
-	var enabled map[*prog.Syscall]bool
-	if obj := serv.EnabledSyscalls.Load(); obj != nil {
-		enabled = obj.(map[*prog.Syscall]bool)
-	}
-	prios, generatable := serv.Cfg.Target.CalculatePriorities(progs, enabled)
+	prios := serv.Cfg.Target.CalculatePriorities(progs)
 
 	data := &UIPrioData{
 		UIPageHeader: serv.pageHeader(r, "syscall priorities"),
 		Call:         callName,
 	}
 	for i, p := range prios[call.ID] {
-		syscall := serv.Cfg.Target.Syscalls[i]
-		if !generatable[syscall] {
-			continue
-		}
-		data.Prios = append(data.Prios, UIPrio{syscall.Name, p})
+		data.Prios = append(data.Prios, UIPrio{serv.Cfg.Target.Syscalls[i].Name, p})
 	}
 	sort.Slice(data.Prios, func(i, j int) bool {
 		return data.Prios[i].Prio > data.Prios[j].Prio
@@ -1083,11 +1020,15 @@ type UICrashPage struct {
 }
 
 type UICrashType struct {
-	BugInfo
-	RankTooltip string
+	Description string
+	FirstTime   time.Time
+	LastTime    time.Time
 	New         bool // was first found in the current run
 	Active      bool // was found in the current run
+	ID          string
+	Count       int
 	Triaged     string
+	Strace      string
 	Crashes     []UICrash
 }
 
@@ -1132,7 +1073,6 @@ type UIInput struct {
 }
 
 type UIPageHeader struct {
-	Name      string
 	PageTitle string
 	// Relative page URL w/o GET parameters (e.g. "/stats").
 	URLPath string
@@ -1156,7 +1096,6 @@ func (serv *HTTPServer) pageHeader(r *http.Request, title string) UIPageHeader {
 	url.Host = ""
 	url.User = nil
 	return UIPageHeader{
-		Name:            serv.Cfg.Name,
 		PageTitle:       title,
 		URLPath:         r.URL.Path,
 		CurrentURL:      url.String(),

@@ -874,15 +874,18 @@ static void initialize_devlink_pci(void)
 #if SYZ_EXECUTOR || SYZ_WIFI || __NR_syz_80211_inject_frame || __NR_syz_80211_join_ibss
 
 #define WIFI_INITIAL_DEVICE_COUNT 2
-#define WIFI_MAC_BASE \
-	{             \
-	    0x08, 0x02, 0x11, 0x00, 0x00, 0x00}
-#define WIFI_IBSS_BSSID \
-	{               \
-	    0x50, 0x50, 0x50, 0x50, 0x50, 0x50}
-#define WIFI_IBSS_SSID \
-	{              \
-	    0x10, 0x10, 0x10, 0x10, 0x10, 0x10}
+#define WIFI_MAC_BASE                              \
+	{                                          \
+		0x08, 0x02, 0x11, 0x00, 0x00, 0x00 \
+	}
+#define WIFI_IBSS_BSSID                            \
+	{                                          \
+		0x50, 0x50, 0x50, 0x50, 0x50, 0x50 \
+	}
+#define WIFI_IBSS_SSID                             \
+	{                                          \
+		0x10, 0x10, 0x10, 0x10, 0x10, 0x10 \
+	}
 #define WIFI_DEFAULT_FREQUENCY 2412
 #define WIFI_DEFAULT_SIGNAL 0
 #define WIFI_DEFAULT_RX_RATE 1
@@ -1503,26 +1506,26 @@ static void initialize_netdevices(void)
 		const char* type;
 		const char* dev;
 	} devtypes[] = {
-	    // Note: ip6erspan device can't be added if ip6gretap exists in the same namespace.
-	    {"ip6gretap", "ip6gretap0"},
-	    {"bridge", "bridge0"},
-	    {"vcan", "vcan0"},
-	    {"bond", "bond0"},
-	    {"team", "team0"},
-	    {"dummy", "dummy0"},
+		// Note: ip6erspan device can't be added if ip6gretap exists in the same namespace.
+		{"ip6gretap", "ip6gretap0"},
+		{"bridge", "bridge0"},
+		{"vcan", "vcan0"},
+		{"bond", "bond0"},
+		{"team", "team0"},
+		{"dummy", "dummy0"},
 #if SYZ_EXECUTOR || SYZ_NIC_VF
-	    {"nicvf", "nicvf0"},
+		{"nicvf", "nicvf0"},
 #endif
-	    {"nlmon", "nlmon0"},
-	    {"caif", "caif0"},
-	    {"batadv", "batadv0"},
-	    // Note: this adds vxcan0/vxcan1 pair, similar to veth (creating vxcan0 would fail).
-	    {"vxcan", "vxcan1"},
-	    // This adds connected veth0 and veth1 devices.
-	    {"veth", 0},
-	    {"wireguard", "wg0"},
-	    {"wireguard", "wg1"},
-	    {"wireguard", "wg2"},
+		{"nlmon", "nlmon0"},
+		{"caif", "caif0"},
+		{"batadv", "batadv0"},
+		// Note: this adds vxcan0/vxcan1 pair, similar to veth (creating vxcan0 would fail).
+		{"vxcan", "vxcan1"},
+		// This adds connected veth0 and veth1 devices.
+		{"veth", 0},
+		{"wireguard", "wg0"},
+		{"wireguard", "wg1"},
+		{"wireguard", "wg2"},
 	};
 	const char* devmasters[] = {"bridge", "bond", "team", "batadv"};
 	// If you extend this array, also update netdev_addr_id in vnet.txt
@@ -1532,67 +1535,67 @@ static void initialize_netdevices(void)
 		int macsize;
 		bool noipv6;
 	} devices[] = {
-	    {"lo", ETH_ALEN},
-	    {"sit0", 0},
-	    {"bridge0", ETH_ALEN},
-	    {"vcan0", 0, true},
-	    {"tunl0", 0},
-	    {"gre0", 0},
-	    {"gretap0", ETH_ALEN},
-	    {"ip_vti0", 0},
-	    {"ip6_vti0", 0},
-	    {"ip6tnl0", 0},
-	    {"ip6gre0", 0},
-	    {"ip6gretap0", ETH_ALEN},
-	    {"erspan0", ETH_ALEN},
-	    {"bond0", ETH_ALEN},
-	    {"veth0", ETH_ALEN},
-	    {"veth1", ETH_ALEN},
-	    {"team0", ETH_ALEN},
-	    {"veth0_to_bridge", ETH_ALEN},
-	    {"veth1_to_bridge", ETH_ALEN},
-	    {"veth0_to_bond", ETH_ALEN},
-	    {"veth1_to_bond", ETH_ALEN},
-	    {"veth0_to_team", ETH_ALEN},
-	    {"veth1_to_team", ETH_ALEN},
-	    {"veth0_to_hsr", ETH_ALEN},
-	    {"veth1_to_hsr", ETH_ALEN},
-	    {"hsr0", 0},
-	    {"dummy0", ETH_ALEN},
+		{"lo", ETH_ALEN},
+		{"sit0", 0},
+		{"bridge0", ETH_ALEN},
+		{"vcan0", 0, true},
+		{"tunl0", 0},
+		{"gre0", 0},
+		{"gretap0", ETH_ALEN},
+		{"ip_vti0", 0},
+		{"ip6_vti0", 0},
+		{"ip6tnl0", 0},
+		{"ip6gre0", 0},
+		{"ip6gretap0", ETH_ALEN},
+		{"erspan0", ETH_ALEN},
+		{"bond0", ETH_ALEN},
+		{"veth0", ETH_ALEN},
+		{"veth1", ETH_ALEN},
+		{"team0", ETH_ALEN},
+		{"veth0_to_bridge", ETH_ALEN},
+		{"veth1_to_bridge", ETH_ALEN},
+		{"veth0_to_bond", ETH_ALEN},
+		{"veth1_to_bond", ETH_ALEN},
+		{"veth0_to_team", ETH_ALEN},
+		{"veth1_to_team", ETH_ALEN},
+		{"veth0_to_hsr", ETH_ALEN},
+		{"veth1_to_hsr", ETH_ALEN},
+		{"hsr0", 0},
+		{"dummy0", ETH_ALEN},
 #if SYZ_EXECUTOR || SYZ_NIC_VF
-	    {"nicvf0", 0, true},
+		{"nicvf0", 0, true},
 #endif
-	    {"nlmon0", 0},
-	    {"vxcan0", 0, true},
-	    {"vxcan1", 0, true},
-	    {"caif0", ETH_ALEN}, // TODO: up'ing caif fails with ENODEV
-	    {"batadv0", ETH_ALEN},
-	    {netdevsim, ETH_ALEN},
-	    {"xfrm0", ETH_ALEN},
-	    {"veth0_virt_wifi", ETH_ALEN},
-	    {"veth1_virt_wifi", ETH_ALEN},
-	    {"virt_wifi0", ETH_ALEN},
-	    {"veth0_vlan", ETH_ALEN},
-	    {"veth1_vlan", ETH_ALEN},
-	    {"vlan0", ETH_ALEN},
-	    {"vlan1", ETH_ALEN},
-	    {"macvlan0", ETH_ALEN},
-	    {"macvlan1", ETH_ALEN},
-	    {"ipvlan0", ETH_ALEN},
-	    {"ipvlan1", ETH_ALEN},
-	    {"veth0_macvtap", ETH_ALEN},
-	    {"veth1_macvtap", ETH_ALEN},
-	    {"macvtap0", ETH_ALEN},
-	    {"macsec0", ETH_ALEN},
-	    {"veth0_to_batadv", ETH_ALEN},
-	    {"veth1_to_batadv", ETH_ALEN},
-	    {"batadv_slave_0", ETH_ALEN},
-	    {"batadv_slave_1", ETH_ALEN},
-	    {"geneve0", ETH_ALEN},
-	    {"geneve1", ETH_ALEN},
-	    {"wg0", 0},
-	    {"wg1", 0},
-	    {"wg2", 0},
+		{"nlmon0", 0},
+		{"vxcan0", 0, true},
+		{"vxcan1", 0, true},
+		{"caif0", ETH_ALEN}, // TODO: up'ing caif fails with ENODEV
+		{"batadv0", ETH_ALEN},
+		{netdevsim, ETH_ALEN},
+		{"xfrm0", ETH_ALEN},
+		{"veth0_virt_wifi", ETH_ALEN},
+		{"veth1_virt_wifi", ETH_ALEN},
+		{"virt_wifi0", ETH_ALEN},
+		{"veth0_vlan", ETH_ALEN},
+		{"veth1_vlan", ETH_ALEN},
+		{"vlan0", ETH_ALEN},
+		{"vlan1", ETH_ALEN},
+		{"macvlan0", ETH_ALEN},
+		{"macvlan1", ETH_ALEN},
+		{"ipvlan0", ETH_ALEN},
+		{"ipvlan1", ETH_ALEN},
+		{"veth0_macvtap", ETH_ALEN},
+		{"veth1_macvtap", ETH_ALEN},
+		{"macvtap0", ETH_ALEN},
+		{"macsec0", ETH_ALEN},
+		{"veth0_to_batadv", ETH_ALEN},
+		{"veth1_to_batadv", ETH_ALEN},
+		{"batadv_slave_0", ETH_ALEN},
+		{"batadv_slave_1", ETH_ALEN},
+		{"geneve0", ETH_ALEN},
+		{"geneve1", ETH_ALEN},
+		{"wg0", 0},
+		{"wg1", 0},
+		{"wg2", 0},
 	};
 	int sock = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
 	if (sock == -1)
@@ -2097,7 +2100,7 @@ struct btf_header {
 };
 
 #define BTF_INFO_KIND(info) (((info) >> 24) & 0x0f)
-#define BTF_INFO_VLEN(info) ((info) & 0xffff)
+#define BTF_INFO_VLEN(info) ((info)&0xffff)
 
 #define BTF_KIND_INT 1
 #define BTF_KIND_ARRAY 3
@@ -2412,17 +2415,16 @@ static long syz_open_dev(volatile long a0, volatile long a1, volatile long a2)
 		sprintf(buf, "/dev/%s/%d:%d", a0 == 0xc ? "char" : "block", (uint8)a1, (uint8)a2);
 		return open(buf, O_RDWR, 0);
 	} else {
-		// syz_open_dev(dev ptr[in, string["/dev/foo#"]], id intptr, flags flags[open_flags]) fd
-		unsigned long nb = a1;
+		// syz_open_dev(dev ptr[in, string["/dev/foo"]], id intptr, flags flags[open_flags]) fd
 		char buf[1024];
 		char* hash;
 		strncpy(buf, (char*)a0, sizeof(buf) - 1);
 		buf[sizeof(buf) - 1] = 0;
 		while ((hash = strchr(buf, '#'))) {
-			*hash = '0' + (char)(nb % 10); // 10 devices should be enough for everyone.
-			nb /= 10;
+			*hash = '0' + (char)(a1 % 10); // 10 devices should be enough for everyone.
+			a1 /= 10;
 		}
-		return open(buf, a2 & ~O_CREAT, 0);
+		return open(buf, a2, 0);
 	}
 }
 #endif
@@ -3151,9 +3153,6 @@ static long syz_mount_image(
 		// For xfs we need nouuid because xfs has a global uuids table
 		// and if two parallel executors mounts fs with the same uuid, second mount fails.
 		strcat(opts, ",nouuid");
-	} else if (strncmp(fs, "gfs2", 4) == 0 && (strstr(opts, "errors=panic") || strstr(opts, "debug"))) {
-		// Otherwise ordinary withdrawals turn into kernel panics, see #6189.
-		strcat(opts, ",errors=withdraw");
 	}
 	debug("syz_mount_image: size=%llu loop='%s' dir='%s' fs='%s' flags=%llu opts='%s'\n", (uint64)size, loopname, target, fs, (uint64)flags, opts);
 #if SYZ_EXECUTOR
@@ -3187,7 +3186,7 @@ error_clear_loop:
 }
 #endif
 
-#if SYZ_EXECUTOR || __NR_syz_kvm_setup_cpu || __NR_syz_kvm_vgic_v3_setup || __NR_syz_kvm_setup_syzos_vm || __NR_syz_kvm_add_vcpu || __NR_syz_kvm_assert_syzos_uexit || __NR_syz_kvm_assert_reg || __NR_syz_kvm_assert_syzos_kvm_exit
+#if SYZ_EXECUTOR || __NR_syz_kvm_setup_cpu || __NR_syz_kvm_vgic_v3_setup || __NR_syz_kvm_setup_syzos_vm || __NR_syz_kvm_add_vcpu || __NR_syz_kvm_assert_syzos_uexit || __NR_syz_kvm_assert_reg
 // KVM is not yet supported on RISC-V
 #if !GOARCH_riscv64 && !GOARCH_arm
 #include <errno.h>
@@ -3200,8 +3199,6 @@ error_clear_loop:
 
 #if GOARCH_amd64
 #include "common_kvm_amd64.h"
-#elif GOARCH_386
-#include "common_kvm_386.h"
 #elif GOARCH_arm64
 #include "common_kvm_arm64.h"
 #elif GOARCH_ppc64 || GOARCH_ppc64le
@@ -5126,41 +5123,41 @@ static void setup_sysctl()
 		const char* data;
 	} files[] = {
 #if GOARCH_amd64 || GOARCH_386
-	    // nmi_check_duration() prints "INFO: NMI handler took too long" on slow debug kernels.
-	    // It happens a lot in qemu, and the messages are frequently corrupted
-	    // (intermixed with other kernel output as they are printed from NMI)
-	    // and are not matched against the suppression in pkg/report.
-	    // This write prevents these messages from being printed.
-	    {"/sys/kernel/debug/x86/nmi_longest_ns", "10000000000"},
+		// nmi_check_duration() prints "INFO: NMI handler took too long" on slow debug kernels.
+		// It happens a lot in qemu, and the messages are frequently corrupted
+		// (intermixed with other kernel output as they are printed from NMI)
+		// and are not matched against the suppression in pkg/report.
+		// This write prevents these messages from being printed.
+		{"/sys/kernel/debug/x86/nmi_longest_ns", "10000000000"},
 #endif
-	    {"/proc/sys/kernel/hung_task_check_interval_secs", "20"},
-	    // bpf_jit_kallsyms and disabling bpf_jit_harden are required
-	    // for unwinding through bpf functions.
-	    {"/proc/sys/net/core/bpf_jit_kallsyms", "1"},
-	    {"/proc/sys/net/core/bpf_jit_harden", "0"},
-	    // This is to provide more useful info in crash reports.
-	    {"/proc/sys/kernel/kptr_restrict", "0"},
-	    {"/proc/sys/kernel/softlockup_all_cpu_backtrace", "1"},
-	    // This is to restrict effects of recursive exponential mounts, for details see
-	    // "mnt: Add a per mount namespace limit on the number of mounts" commit.
-	    {"/proc/sys/fs/mount-max", "100"},
-	    // Dumping all tasks to console can take too long.
-	    {"/proc/sys/vm/oom_dump_tasks", "0"},
-	    // Executor hits lots of SIGSEGVs, no point in logging them.
-	    {"/proc/sys/debug/exception-trace", "0"},
-	    {"/proc/sys/kernel/printk", "7 4 1 3"},
-	    // Faster gc (1 second) is intended to make tests more repeatable.
-	    {"/proc/sys/kernel/keys/gc_delay", "1"},
-	    // We always want to prefer killing the allocating test process rather than somebody else
-	    // (sshd or another random test process).
-	    {"/proc/sys/vm/oom_kill_allocating_task", "1"},
-	    // This blocks some of the ways the fuzzer can trigger a reboot.
-	    // ctrl-alt-del=0 tells kernel to signal cad_pid instead of rebooting.
-	    // We set cad_pid to a transient process pid ctrl-alt-del a no-op.
-	    // Note: we need to write a live process pid.
-	    // For context see: https://groups.google.com/g/syzkaller-bugs/c/WqOY4TiRnFg/m/6P9u8lWZAQAJ
-	    {"/proc/sys/kernel/ctrl-alt-del", "0"},
-	    {"/proc/sys/kernel/cad_pid", tmppid},
+		{"/proc/sys/kernel/hung_task_check_interval_secs", "20"},
+		// bpf_jit_kallsyms and disabling bpf_jit_harden are required
+		// for unwinding through bpf functions.
+		{"/proc/sys/net/core/bpf_jit_kallsyms", "1"},
+		{"/proc/sys/net/core/bpf_jit_harden", "0"},
+		// This is to provide more useful info in crash reports.
+		{"/proc/sys/kernel/kptr_restrict", "0"},
+		{"/proc/sys/kernel/softlockup_all_cpu_backtrace", "1"},
+		// This is to restrict effects of recursive exponential mounts, for details see
+		// "mnt: Add a per mount namespace limit on the number of mounts" commit.
+		{"/proc/sys/fs/mount-max", "100"},
+		// Dumping all tasks to console can take too long.
+		{"/proc/sys/vm/oom_dump_tasks", "0"},
+		// Executor hits lots of SIGSEGVs, no point in logging them.
+		{"/proc/sys/debug/exception-trace", "0"},
+		{"/proc/sys/kernel/printk", "7 4 1 3"},
+		// Faster gc (1 second) is intended to make tests more repeatable.
+		{"/proc/sys/kernel/keys/gc_delay", "1"},
+		// We always want to prefer killing the allocating test process rather than somebody else
+		// (sshd or another random test process).
+		{"/proc/sys/vm/oom_kill_allocating_task", "1"},
+		// This blocks some of the ways the fuzzer can trigger a reboot.
+		// ctrl-alt-del=0 tells kernel to signal cad_pid instead of rebooting.
+		// We set cad_pid to a transient process pid ctrl-alt-del a no-op.
+		// Note: we need to write a live process pid.
+		// For context see: https://groups.google.com/g/syzkaller-bugs/c/WqOY4TiRnFg/m/6P9u8lWZAQAJ
+		{"/proc/sys/kernel/ctrl-alt-del", "0"},
+		{"/proc/sys/kernel/cad_pid", tmppid},
 
 	};
 	for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
@@ -5849,60 +5846,6 @@ static long syz_pidfd_open(volatile long pid, volatile long flags)
 		pid = 0;
 	}
 	return syscall(__NR_pidfd_open, pid, flags);
-}
-
-#endif
-
-#if SYZ_EXECUTOR || __NR_syz_kfuzztest_run
-
-#include <fcntl.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
-
-static long syz_kfuzztest_run(volatile long test_name_ptr, volatile long input_data,
-			      volatile long input_data_size, volatile long buffer)
-{
-	const char* test_name = (const char*)test_name_ptr;
-	if (!test_name) {
-		debug("syz_kfuzztest_run: test name was NULL\n");
-		return -1;
-	}
-	if (!buffer) {
-		debug("syz_kfuzztest_run: buffer was NULL\n");
-		return -1;
-	}
-
-	char buf[256];
-	int ret = snprintf(buf, sizeof(buf), "/sys/kernel/debug/kfuzztest/%s/input", test_name);
-	if (ret < 0 || (unsigned long)ret >= sizeof(buf)) {
-		debug("syz_kfuzztest_run: constructed path is too long or snprintf failed\n");
-		return -1;
-	}
-
-	int fd = openat(AT_FDCWD, buf, O_WRONLY, 0);
-	if (fd < 0) {
-		debug("syz_kfuzztest_run: failed to open %s\n", buf);
-		return -1;
-	}
-
-	ssize_t bytes_written = write(fd, (void*)buffer, (size_t)input_data_size);
-	if (bytes_written != input_data_size) {
-		debug("syz_kfuzztest_run: failed to write to %s, reason: %s\n", buf, strerror(errno));
-		close(fd);
-		return -1;
-	}
-
-	if (close(fd) != 0) {
-		debug("syz_kfuzztest_run: failed to close file\n");
-		return -1;
-	}
-
-	return 0;
 }
 
 #endif

@@ -18,7 +18,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/syzkaller/pkg/build"
 	"github.com/google/syzkaller/pkg/kconfig"
 	"github.com/google/syzkaller/pkg/osutil"
 	"github.com/google/syzkaller/pkg/tool"
@@ -62,6 +61,7 @@ func main() {
 		tool.Fail(err)
 	}
 	// In order to speed up the process we generate instances that use the same kernel revision in parallel.
+	failed := false
 	generated := make(map[string]bool)
 	for _, inst := range instances {
 		// Find the first instance that we did not generate yet.
@@ -102,16 +102,15 @@ func main() {
 				results <- nil
 			}()
 		}
-		failed := false
 		for i := 0; i < batch; i++ {
 			if err := <-results; err != nil {
 				fmt.Printf("%v\n", err)
 				failed = true
 			}
 		}
-		if failed {
-			tool.Failf("some configs failed")
-		}
+	}
+	if failed {
+		tool.Failf("some configs failed")
 	}
 	if len(generated) == 0 {
 		tool.Failf("unknown instance name")
@@ -315,17 +314,7 @@ func (ctx *Context) verifyConfigs(cf *kconfig.ConfigFile) error {
 		if act == kconfig.No {
 			errs.push("%v:%v: %v is not present in the final config", cfg.File, cfg.Line, cfg.Name)
 		} else if cfg.Value == kconfig.No {
-			var selectedBy []string
-			for name := range ctx.Kconf.SelectedBy(cfg.Name) {
-				if cf.Value(name) == kconfig.Yes {
-					selectedBy = append(selectedBy, name)
-				}
-			}
-			selectedByStr := ""
-			if len(selectedBy) > 0 {
-				selectedByStr = fmt.Sprintf(", possibly selected by %q", selectedBy)
-			}
-			errs.push("%v:%v: %v is present in the final config%s", cfg.File, cfg.Line, cfg.Name, selectedByStr)
+			errs.push("%v:%v: %v is present in the final config", cfg.File, cfg.Line, cfg.Name)
 		} else {
 			errs.push("%v:%v: %v does not match final config %v vs %v",
 				cfg.File, cfg.Line, cfg.Name, cfg.Value, act)
@@ -455,21 +444,22 @@ clean:
 }
 
 func (ctx *Context) Make(args ...string) error {
-	compiler, linker := "", ""
+	args = append(args,
+		"O="+ctx.BuildDir,
+		"ARCH="+ctx.Target.KernelArch,
+		"-j", fmt.Sprint(runtime.NumCPU()),
+	)
+	if ctx.Target.Triple != "" {
+		args = append(args, "CROSS_COMPILE="+ctx.Target.Triple+"-")
+	}
 	if ctx.Inst.Compiler != "" {
-		compiler = ctx.replaceVars(ctx.Inst.Compiler)
+		args = append(args, "CC="+ctx.replaceVars(ctx.Inst.Compiler))
+	} else if ctx.Target.KernelCompiler != "" {
+		args = append(args, "CC="+ctx.Target.KernelCompiler)
 	}
 	if ctx.Inst.Linker != "" {
-		linker = ctx.replaceVars(ctx.Inst.Linker)
+		args = append(args, "LD="+ctx.replaceVars(ctx.Inst.Linker))
 	}
-	args = append(args, build.LinuxMakeArgs(
-		ctx.Target,
-		compiler,
-		linker,
-		"", // ccache
-		ctx.BuildDir,
-		runtime.NumCPU(),
-	)...)
 	_, err := osutil.RunCmd(10*time.Minute, ctx.SourceDir, "make", args...)
 	return err
 }

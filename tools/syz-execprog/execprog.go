@@ -67,6 +67,8 @@ var (
 
 	flagGDB = flag.Bool("gdb", false, "start executor under gdb")
 
+	flagResult = flag.String("result", "", "the file path for saving result")
+
 	// The following flag is only kept to let syzkaller remain compatible with older execprog versions.
 	// In order to test incoming patches or perform bug bisection, syz-ci must use the exact syzkaller
 	// version that detected the bug (as descriptions and syntax could've already been changed), and
@@ -104,6 +106,9 @@ func main() {
 		if opt != "" && !featureFlags[opt].Enabled {
 			features &= ^feat
 		}
+	}
+	if *flagResult != "" {
+		WriteContentToFile(*flagResult, "")
 	}
 
 	var requestedSyscalls []int
@@ -143,6 +148,17 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
+
+	if *flagResult != "" {
+		removefile := strings.Split(*flagResult, ".")[0]
+		err := os.Remove(removefile)
+		if err != nil {
+			fmt.Printf("remove file:%v %v failed\n", removefile, err)
+			return
+		}
+		fmt.Printf("remove file : %s\n", removefile)
+	}
+
 	rpcCtx, done := context.WithCancel(context.Background())
 	ctx := &Context{
 		target:    target,
@@ -182,7 +198,6 @@ func main() {
 		HandleInterrupts: true,
 		GDB:              *flagGDB,
 		MachineChecked:   ctx.machineChecked,
-		OutputWriter:     os.Stderr,
 	}
 	if err := rpcserver.RunLocal(rpcCtx, cfg); err != nil {
 		tool.Fail(err)
@@ -289,6 +304,16 @@ func (ctx *Context) Done(req *queue.Request, res *queue.Result) bool {
 		if ctx.coverFile != "" {
 			ctx.dumpCoverage(res.Info)
 		}
+		if *flagResult != "" {
+			context := ""
+			for i := range res.Info.Calls {
+				req.Prog.Calls[i].Errno = res.Info.Calls[i].Error
+				context += fmt.Sprintf("%v\n", req.Prog.Calls[i].Errno)
+			}
+			log.Logf(0, "write to %v\n", *flagResult)
+			WriteContentToFile(*flagResult, context)
+		}
+
 	}
 	completed := int(ctx.completed.Add(1))
 	if ctx.repeat > 0 && completed >= len(ctx.progs)*ctx.repeat {
@@ -424,4 +449,10 @@ func loadPrograms(target *prog.Target, files []string) []*prog.Prog {
 	}
 	log.Logf(0, "parsed %v programs", len(progs))
 	return progs
+}
+
+// WriteLinesToFile
+func WriteContentToFile(filePath string, content string) error {
+	// create if file noe exit; or recover
+	return os.WriteFile(filePath, []byte(content), 0644)
 }

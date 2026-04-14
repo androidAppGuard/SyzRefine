@@ -19,7 +19,7 @@ func TestExtractCommand(t *testing.T) {
 			if diff := cmp.Diff(test.cmd, cmd); diff != "" {
 				t.Fatal(diff)
 			}
-			cmd, _ = extractCommand(strings.ReplaceAll(test.body, "\n", "\r\n"))
+			cmd, _ = extractCommand(strings.Replace(test.body, "\n", "\r\n", -1))
 			if diff := cmp.Diff(test.cmd, cmd); diff != "" {
 				t.Fatal(diff)
 			}
@@ -130,8 +130,8 @@ func TestParse(t *testing.T) {
 		}
 		t.Run(fmt.Sprint(i), func(t *testing.T) { body(t, test) })
 
-		test.email = strings.ReplaceAll(test.email, "\n", "\r\n")
-		test.res.Body = strings.ReplaceAll(test.res.Body, "\n", "\r\n")
+		test.email = strings.Replace(test.email, "\n", "\r\n", -1)
+		test.res.Body = strings.Replace(test.res.Body, "\n", "\r\n", -1)
 		t.Run(fmt.Sprint(i)+"rn", func(t *testing.T) { body(t, test) })
 	}
 }
@@ -442,7 +442,6 @@ For more options, visit https://groups.google.com/d/optout.`,
 			Subject:   "test subject",
 			Author:    "bob@example.com",
 			Cc:        []string{"bob@example.com"},
-			RawCc:     []string{"bob@example.com", "foo+4564456@bar.com"},
 			Body: `text body
 second line
 #syz fix: 	 arg1 arg2 arg3 	
@@ -483,7 +482,6 @@ To view this discussion visit https://groups.google.com/d/msgid/syzkaller-bugs/6
 			Subject:   "new footer",
 			Author:    "bob@example.com",
 			Cc:        []string{"bob@example.com"},
-			RawCc:     []string{"bob@example.com", "foo+4564456@bar.com"},
 			Body: `some title
 
 -- 
@@ -510,7 +508,6 @@ last line`,
 			Author:    "foo@bar.com",
 			OwnEmail:  true,
 			Cc:        []string{"bob@example.com"},
-			RawCc:     []string{"bob@example.com", "foo+4564456@bar.com"},
 			Body: `text body
 last line`,
 			Patch: "",
@@ -532,7 +529,6 @@ last line`,
 			Subject:   "test subject",
 			Author:    "bob@example.com",
 			Cc:        []string{"alice@example.com", "bob@example.com", "bot@example.com"},
-			RawCc:     []string{"alice@example.com", "bob@example.com", "bot@example.com"},
 			Body: `#syz  invalid   	 
 text body
 second line
@@ -564,7 +560,6 @@ last line
 			Subject:   "test subject",
 			Author:    "bob@example.com",
 			Cc:        []string{"alice@example.com", "bob@example.com", "bot@example.com"},
-			RawCc:     []string{"alice@example.com", "bob@example.com", "bot@example.com"},
 			Body: `text body
 second line
 last line
@@ -610,7 +605,6 @@ IHQpKSB7CiAJCXNwaW5fdW5sb2NrKCZrY292LT5sb2NrKTsKIAkJcmV0dXJuOwo=
 			Subject:   "test subject",
 			Author:    "bob@example.com",
 			Cc:        []string{"bob@example.com", "bot@example.com"},
-			RawCc:     []string{"bob@example.com", "bot@example.com"},
 			Body: `body text
 >#syz test
 `,
@@ -698,7 +692,6 @@ or)</div></div></div>
 			Subject:   "test subject",
 			Author:    "bob@example.com",
 			Cc:        []string{"bob@example.com", "bot@example.com"},
-			RawCc:     []string{"bob@example.com", "bot@example.com"},
 			Body: `On Mon, May 8, 2017 at 6:47 PM, Bob wrote:
 > body text
 
@@ -781,7 +774,6 @@ d
 		Subject:   "Re: BUG: unable to handle kernel NULL pointer dereference in sock_poll",
 		Author:    "bar@foo.com",
 		Cc:        []string{"bar@foo.com", "syzbot@syzkaller.appspotmail.com"},
-		RawCc:     []string{"bar@foo.com", "syzbot+344bb0f46d7719cd9483@syzkaller.appspotmail.com"},
 		Body: `On 2018/06/10 4:57, syzbot wrote:
 > Hello,
 > 
@@ -812,7 +804,6 @@ BUG: unable to handle kernel NULL pointer dereference in corrupted
 `, Email{
 		Author: "bar@foo.com",
 		Cc:     []string{"bar@foo.com", "syzbot@syzkaller.appspotmail.com"},
-		RawCc:  []string{"bar@foo.com", "syzbot+6dd701dc797b23b8c761@syzkaller.appspotmail.com"},
 		Body: `#syz dup:
 BUG: unable to handle kernel NULL pointer dereference in corrupted
 `,
@@ -834,7 +825,6 @@ When freeing a lockf struct that already is part of a linked list, make sure to
 `, Email{
 		Author: "bar@foo.com",
 		Cc:     []string{"bar@foo.com", "syzbot@syzkaller.appspotmail.com"},
-		RawCc:  []string{"bar@foo.com", "syzbot+6dd701dc797b23b8c761@syzkaller.appspotmail.com"},
 		Body: `#syz fix:
 When freeing a lockf struct that already is part of a linked list, make sure to
 `,
@@ -860,7 +850,6 @@ nothing to see here`,
 			Subject:   "#syz test: git://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git master",
 			Author:    "bob@example.com",
 			Cc:        []string{"bob@example.com"},
-			RawCc:     []string{"bob@example.com", "foo+4564456@bar.com"},
 			Body:      `nothing to see here`,
 			Commands: []*SingleCommand{
 				{
@@ -885,7 +874,6 @@ nothing to see here`,
 			Author:      "user@mail.com",
 			MailingList: "list@googlegroups.com",
 			Cc:          []string{"list@googlegroups.com", "user@mail.com"},
-			RawCc:       []string{"list@googlegroups.com", "user@mail.com"},
 			Body:        `nothing to see here`,
 		}},
 	{`Date: Sun, 7 May 2017 19:54:00 -0700
@@ -903,7 +891,6 @@ nothing to see here`,
 			Author:      "user@mail.com",
 			MailingList: "list@googlegroups.com",
 			Cc:          []string{"list@googlegroups.com", "user2@mail.com", "user@mail.com"},
-			RawCc:       []string{"list@googlegroups.com", "user2@mail.com", "user@mail.com"},
 			Body:        `nothing to see here`,
 		}},
 	// A faulty case, just check we handle it normally.
@@ -921,7 +908,6 @@ nothing to see here`,
 			Author:      "list@googlegroups.com",
 			MailingList: "list@googlegroups.com",
 			Cc:          []string{"list@googlegroups.com", "user2@mail.com"},
-			RawCc:       []string{"list@googlegroups.com", "user2@mail.com"},
 			Body:        `nothing to see here`,
 		}},
 	{`Sender: syzkaller-bugs@googlegroups.com
@@ -945,7 +931,6 @@ f950fddb9ea6bdb5e39
 		Subject:   "Re: BUG: unable to handle kernel NULL pointer dereference in sock_poll",
 		Author:    "bar@foo.com",
 		Cc:        []string{"bar@foo.com", "syzbot@syzkaller.appspotmail.com"},
-		RawCc:     []string{"bar@foo.com", "syzbot+344bb0f46d7719cd9483@syzkaller.appspotmail.com"},
 		Body: `#syz 
 test: https://github.com/torvalds/linux.git 7b5bb460defa107dd2e82f950fddb9ea6bdb5e39
 `,
@@ -976,7 +961,6 @@ Reported-by: syzbot <foo+223c7461c58c58a4cb10@bar.com>
 		Subject:   "[PATCH] Some patch",
 		Author:    "bar@foo.com",
 		Cc:        []string{"bar@foo.com", "someone@foo.com"},
-		RawCc:     []string{"bar@foo.com", "someone@foo.com"},
 		Body: `Reported-by: syzbot <foo+223c7461c58c58a4cb10@bar.com>
 `,
 	}},
@@ -998,7 +982,6 @@ Link: https://bar.com/bug?extid=223c7461c58c58a4cb10@bar.com
 		Subject:   "[PATCH] Some patch",
 		Author:    "bar@foo.com",
 		Cc:        []string{"bar@foo.com", "someone@foo.com"},
-		RawCc:     []string{"bar@foo.com", "someone@foo.com"},
 		Body: `Link: https://bar.com/bug?extid=223c7461c58c58a4cb10@bar.com
 `,
 	}},
@@ -1023,7 +1006,6 @@ Reported-by: syzbot <foo+9909090909090909@bar.com>
 		Subject:   "[PATCH] Some patch",
 		Author:    "bar@foo.com",
 		Cc:        []string{"bar@foo.com", "someone@foo.com"},
-		RawCc:     []string{"bar@foo.com", "someone@foo.com"},
 		Body: `Reported-by: syzbot <foo+223c7461c58c58a4cb10@bar.com>
 Reported-by: syzbot <foo+9909090909090909@bar.com>
 `,
@@ -1048,7 +1030,6 @@ Reported-by: syzbot <foo+223c7461c58c58a4cb10@bar.com>
 		Subject:   "[PATCH] Some patch",
 		Author:    "bar@foo.com",
 		Cc:        []string{"bar@foo.com", "someone@foo.com"},
-		RawCc:     []string{"bar@foo.com", "foo+9909090909090909@bar.com", "someone@foo.com"},
 		Body: `Reported-by: syzbot <foo+223c7461c58c58a4cb10@bar.com>
 `,
 	}},
@@ -1077,7 +1058,6 @@ Some text
 		Subject:   "Some discussion",
 		Author:    "bar@foo.com",
 		Cc:        []string{"bar@foo.com", "someone@foo.com"},
-		RawCc:     []string{"bar@foo.com", "someone@foo.com"},
 		Body:      "Some text\n",
 	}},
 	{`Sender: syzkaller-bugs@googlegroups.com
@@ -1100,7 +1080,6 @@ Content-Transfer-Encoding: quoted-printable
 		Subject:   "Re: BUG: unable to handle kernel NULL pointer dereference in sock_poll",
 		Author:    "bar@foo.com",
 		Cc:        []string{"bar@foo.com", "syzbot@syzkaller.appspotmail.com"},
-		RawCc:     []string{"bar@foo.com", "syzbot+344bb0f46d7719cd9483@syzkaller.appspotmail.com"},
 		Body: `#syz test: aaa bbb
 #syz test: ccc ddd
 `,
@@ -1116,26 +1095,5 @@ Content-Transfer-Encoding: quoted-printable
 				Args:    "ccc ddd",
 			},
 		},
-	}},
-	{`Sender: foo@foobar.com
-Subject: [PATCH] =?UTF-8?q?Add=20a=20new=20test=20'migrate.cow=5Fafter=5Ff?= =?UTF-8?q?ork'=20that=20verifies=20correct=20RMAP=20handling=20of=20Copy-?= =?UTF-8?q?On-Write=20pages=20after=20fork().=20Before=20a=20write,=20pare?= =?UTF-8?q?nt=20and=20child=20share=20the=20same=20PFN;?=
-To: <bar@foo.com>
-From: <foo@foobar.com>
-Message-ID: <1250334f-7220-2bff-5d87-b87573758d81@bar.com>
-Date: Sun, 7 May 2017 19:54:00 -0700
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-Body
-`, Email{
-		MessageID: "<1250334f-7220-2bff-5d87-b87573758d81@bar.com>",
-		Date:      time.Date(2017, time.May, 7, 19, 54, 0, 0, parseTestZone),
-		Subject:   "[PATCH] Add a new test 'migrate.cow_after_fork' that verifies correct RMAP handling of Copy-On-Write pages after fork(). Before a write, parent and child share the same PFN;",
-		Author:    "foo@foobar.com",
-		Cc:        []string{"bar@foo.com", "foo@foobar.com"},
-		RawCc:     []string{"bar@foo.com", "foo@foobar.com"},
-		Body: `Body
-`,
 	}},
 }

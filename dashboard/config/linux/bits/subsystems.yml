@@ -10,7 +10,6 @@ config:
  - POSIX_MQUEUE
  - NO_HZ
  - HIGH_RES_TIMERS
- - POSIX_AUX_CLOCKS: [v6.17]
  - PREEMPT
  - IRQ_TIME_ACCOUNTING: [-riscv, -s390]
  - BSD_PROCESS_ACCT
@@ -25,10 +24,10 @@ config:
  - LOG_BUF_SHIFT: 18
  - NUMA: [-arm]
  - NUMA_EMU: [x86_64]
- - NUMA_BALANCING: [-arm, -preempt_rt]
- - NUMA_BALANCING_DEFAULT_ENABLED: [-arm, -preempt_rt]
+ - NUMA_BALANCING: [-arm]
+ - NUMA_BALANCING_DEFAULT_ENABLED: [-arm]
  # Starting from v6.13, depends on !CPU_MITIGATIONS.
- - ADDRESS_MASKING: [x86_64, v6.4, -v6.12, -stable-6.6]
+ - ADDRESS_MASKING: [x86_64, v6.4, -v6.12]
  - X86_USER_SHADOW_STACK: [x86_64, v6.6]
  # KMSAN disables HYPERVISOR_GUEST which is required to enable this.
  - X86_X2APIC: [x86_64, -kmsan]
@@ -45,9 +44,7 @@ config:
  - CGROUP_DEVICE
  - CGROUP_CPUACCT
  - CGROUP_PERF
- # It's incredibly difficult/impossible to reliably clean up these bpf links,
- # so let's only fuzz it on the snapshot-based instances. See #5956.
- - CGROUP_BPF: [snapshot]
+ - CGROUP_BPF
  - CHECKPOINT_RESTORE
  - USERFAULTFD
  - COMPAT_BRK: n
@@ -76,7 +73,6 @@ config:
  - KVM_PROVE_MMU: [x86_64, v6.6]
  - KVM_SW_PROTECTED_VM: [x86_64, v6.8]
  - KVM_HYPERV: [x86_64, v6.8]
- - KVM_IOAPIC: [x86_64, v6.17]
  # KMSAN disables HYPERVISOR_GUEST which is required to enable X86_X2APIC
  # which is required to enable this.
  - X86_SGX: [x86_64, v5.11, -kmsan]
@@ -103,13 +99,13 @@ config:
  - BINFMT_SCRIPT
  - MEMORY_HOTPLUG: [-arm]
  # Replaced in "mm: add build-time option for hotplug memory default online type".
- - MEMORY_HOTPLUG_DEFAULT_ONLINE: [-arm, -v6.14]
- - MHP_DEFAULT_ONLINE_TYPE_ONLINE_AUTO: [-arm, v6.14]
+ - MEMORY_HOTPLUG_DEFAULT_ONLINE: [-arm, -linux-next]
+ - MHP_DEFAULT_ONLINE_TYPE_ONLINE_AUTO: [-arm, linux-next]
  - MEMORY_HOTREMOVE: [-arm]
  - ANON_VMA_NAME: [v5.17]
  - KSM
- - TRANSPARENT_HUGEPAGE: [-arm, -preempt_rt]
- - TRANSPARENT_HUGEPAGE_MADVISE: [-arm, -preempt_rt]
+ - TRANSPARENT_HUGEPAGE: [-arm]
+ - TRANSPARENT_HUGEPAGE_MADVISE: [-arm]
  - FRONTSWAP: [-v6.6]
  - CMA
  - MEM_SOFT_DIRTY: [x86_64]
@@ -120,7 +116,7 @@ config:
  - ZONE_DEVICE: [-arm, -riscv, -s390]
  - DEVICE_PRIVATE: [-arm, -riscv, -s390]
  - PERCPU_STATS
- - READ_ONLY_THP_FOR_FS: [-arm, -riscv, -preempt_rt]
+ - READ_ONLY_THP_FOR_FS: [-arm, -riscv]
  - PCI
  - PCIEPORTBUS
  - HOTPLUG_PCI_PCIE
@@ -153,7 +149,7 @@ config:
  - NVDIMM_DAX: [x86_64]
  - OF_PMEM: [x86_64]
  - DAX: [x86_64]
- - DEV_DAX: [x86_64, -preempt_rt]
+ - DEV_DAX: [x86_64]
  - BLK_DEV_NULL_BLK
  - BLK_DEV_NULL_BLK_FAULT_INJECTION
  - ZRAM
@@ -296,7 +292,7 @@ config:
  - DRM_DISPLAY_DP_AUX_BUS: [v6.10, -s390]
  - DRM_DISPLAY_DP_HELPER: [v5.19, -s390]
  - DRM_DEBUG_MM
- - DRM_I915: [x86_64, -preempt_rt]
+ - DRM_I915: [x86_64]
  - DRM_VGEM
  - DRM_VKMS
  - DRM_VMWGFX: [x86_64]
@@ -335,7 +331,6 @@ config:
  - SND_PCI
  - SND_OSSEMUL
  - SND_MIXER_OSS
- - SND_PCM
  - SND_PCM_OSS
  - SND_PCM_OSS_PLUGINS
  - SND_HRTIMER
@@ -361,14 +356,12 @@ config:
  - SND_HDA_CODEC_CA0132
  - SND_HDA_CODEC_CMEDIA
  - SND_HDA_CODEC_SI3054
- # SND_HDA_INTEL is disabled by kmsan.yml because of some compatibility problems.
- - SND_HDA_PREALLOC_SIZE: [0, -kmsan]
+ - SND_HDA_PREALLOC_SIZE: 0
  - SND_USB_AUDIO
  - SND_FIREWORKS: n
  - SND_FIREWIRE_TASCAM: n
  - HID_BATTERY_STRENGTH: [-s390]
  - HIDRAW: [-s390]
- - HID_HAPTIC: [v6.18]
  - UHID: [-s390]
  - USB_HIDDEV: [-s390]
  - USB_ANNOUNCE_NEW_DEVICES
@@ -386,7 +379,6 @@ config:
  - USB_UAS
  - USB_DWC3
  - USB_DWC3_GADGET
- - USB_DWC3_GENERIC_PLAT: [v6.18]
  - USB_CHIPIDEA
  - USB_CHIPIDEA_UDC
  - USB_SERIAL
@@ -483,7 +475,9 @@ config:
  # Earlier we defined here 32 devices and syzkaller allocated one per test process.
  # When binderfs is used, we don't need that many - 2 is enough.
  - ANDROID_BINDER_DEVICES: "binder0,binder1"
- - ANDROID_BINDERFS
+ # TODO: re-enable it once https://syzkaller.appspot.com/bug?extid=72b65b56208e052e606c
+ # is addressed.
+ - ANDROID_BINDERFS: [-v6.14, -linux-next]
  - COUNTER
  - VALIDATE_FS_PARSER
  - PSTORE
@@ -495,9 +489,8 @@ config:
  - PSTORE_ZSTD_COMPRESS: [-v6.6]
  - PSTORE_COMPRESS
  - PSTORE_DEFLATE_COMPRESS_DEFAULT: [-v6.6]
- # For some architectures, we may only have FS_DAX_LIMITED.
- - FS_DAX: [-arm, -riscv, -s390]
- - FS_DAX_LIMITED: [s390, arm, riscv]
+ # Didn't find how to enable it for riscv in v5.18
+ - FS_DAX: [-arm, -riscv]
  - FS_ENCRYPTION
  - FS_VERITY
  - FS_VERITY_BUILTIN_SIGNATURES
@@ -587,9 +580,8 @@ config:
  - PKCS7_TEST_KEY
  - SIGNED_PE_FILE_VERIFICATION
  - SECONDARY_TRUSTED_KEYRING
- # CRC4 and CRC7 can now only be selected.
- - CRC4: [-v6.15]
- - CRC7: [-v6.15]
+ - CRC4
+ - CRC7
  - SCHEDSTATS
  - RAW_DRIVER: [-v5.14]
  - THERMAL: [v5.8]
@@ -604,11 +596,7 @@ config:
  - DAMON_RECLAIM: [v5.17]
  - ZSWAP_DEFAULT_ON: [v5.7]
  - SMB_SERVER: [v5.15]
- - SYSFS_SYSCALL
- - PREEMPT_RT: [v6.16, preempt_rt]
 
  # For testing of core dumping functionality itself.
  - COREDUMP
  - ELF_CORE
-
- - IO_URING_MOCK_FILE: [v6.17]

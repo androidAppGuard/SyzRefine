@@ -174,6 +174,8 @@ func runMake(params Params, extraArgs ...string) error {
 		"KBUILD_BUILD_TIMESTAMP=now",
 		"KBUILD_BUILD_USER=syzkaller",
 		"KBUILD_BUILD_HOST=syzkaller",
+		"KERNELVERSION=syzkaller",
+		"LOCALVERSION=-syzkaller",
 	)
 	output, err := osutil.Run(time.Hour, cmd)
 	params.Tracer.Log("Build log:\n%s", output)
@@ -182,11 +184,6 @@ func runMake(params Params, extraArgs ...string) error {
 
 func LinuxMakeArgs(target *targets.Target, compiler, linker, ccache, buildDir string, jobs int) []string {
 	args := []string{
-		// Make still overrides these if they are passed as env variables.
-		// Let's pass them directly as make arguments.
-		"KERNELVERSION=syzkaller",
-		"KERNELRELEASE=syzkaller",
-		"LOCALVERSION=-syzkaller",
 		"-j", fmt.Sprint(jobs),
 		"ARCH=" + target.KernelArch,
 	}
@@ -203,17 +200,10 @@ func LinuxMakeArgs(target *targets.Target, compiler, linker, ccache, buildDir st
 		if ccache != "" {
 			compiler = ccache + " " + compiler
 		}
+		args = append(args, "CC="+compiler)
 	}
-	// The standard way to build Linux with clang is to pass LLVM=1 instead of CC= and LD=.
-	if compiler == targets.DefaultLLVMCompiler && (linker == "" || linker == targets.DefaultLLVMLinker) {
-		args = append(args, "LLVM=1")
-	} else {
-		if compiler != "" {
-			args = append(args, "CC="+compiler)
-		}
-		if linker != "" {
-			args = append(args, "LD="+linker)
-		}
+	if linker != "" {
+		args = append(args, "LD="+linker)
 	}
 	if buildDir != "" {
 		args = append(args, "O="+buildDir)
@@ -257,82 +247,6 @@ func queryLinuxCompiler(kernelDir string) (string, error) {
 		return "", fmt.Errorf("include/generated/compile.h does not contain build information")
 	}
 	return string(result[1]), nil
-}
-
-type SectionHashes struct {
-	Text map[string]string `json:"text"`
-	Data map[string]string `json:"data"` // Merged .data and .rodata.
-}
-
-// ElfSymbolHashes returns a map of sha256 hashes per section per symbol contained in the elf file.
-// It's best to call it on vmlinux.o since PCs in the binary code are not patched yet.
-func ElfSymbolHashes(bin string) (SectionHashes, error) {
-	result := SectionHashes{
-		Text: make(map[string]string),
-		Data: make(map[string]string),
-	}
-
-	file, err := elf.Open(bin)
-	if err != nil {
-		return SectionHashes{}, err
-	}
-	defer file.Close()
-
-	symbols, err := file.Symbols()
-	if err != nil {
-		return SectionHashes{}, err
-	}
-
-	rawFile, err := os.Open(bin)
-	if err != nil {
-		return SectionHashes{}, err
-	}
-	defer rawFile.Close()
-
-	sections := make(map[elf.SectionIndex]*elf.Section)
-	for i, s := range file.Sections {
-		sections[elf.SectionIndex(i)] = s
-	}
-
-	for _, s := range symbols {
-		if s.Name == "" || s.Size == 0 || s.Section >= elf.SHN_LORESERVE {
-			continue
-		}
-
-		symbolSection, ok := sections[s.Section]
-		if !ok || symbolSection.Type == elf.SHT_NOBITS {
-			continue
-		}
-
-		var targetMap map[string]string
-
-		symbolType := elf.ST_TYPE(s.Info)
-		sectionFlags := symbolSection.Flags
-		switch {
-		case symbolType == elf.STT_FUNC && (sectionFlags&elf.SHF_EXECINSTR) != 0:
-			targetMap = result.Text
-		case symbolType == elf.STT_OBJECT && (sectionFlags&elf.SHF_ALLOC) != 0 &&
-			(sectionFlags&elf.SHF_EXECINSTR) == 0:
-			targetMap = result.Data
-		default:
-			continue
-		}
-
-		offset := s.Value - symbolSection.Addr
-		if offset+s.Size > symbolSection.Size {
-			continue
-		}
-
-		data := make([]byte, s.Size)
-		_, err := rawFile.ReadAt(data, int64(symbolSection.Offset+offset))
-		if err != nil {
-			continue
-		}
-
-		hash := sha256.Sum256(data)
-		targetMap[s.Name] = hex.EncodeToString(hash[:])
-	}
-	return result, nil
 }
 
 // elfBinarySignature calculates signature of an elf binary aiming at runtime behavior

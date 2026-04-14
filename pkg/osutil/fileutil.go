@@ -4,12 +4,9 @@
 package osutil
 
 import (
-	"bytes"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
-	"path/filepath"
 )
 
 // CopyFile atomically copies oldFile to newFile preserving permissions and modification time.
@@ -53,21 +50,6 @@ func Rename(oldFile, newFile string) error {
 	return err
 }
 
-// FillDirectory is used to fill in directory structure for tests.
-func FillDirectory(dir string, fileContent map[string]string) error {
-	for path, content := range fileContent {
-		fullPath := filepath.Join(dir, path)
-		dirPath := filepath.Dir(fullPath)
-		if err := MkdirAll(dirPath); err != nil {
-			return fmt.Errorf("mkdir %q failed: %w", dirPath, err)
-		}
-		if err := WriteFile(fullPath, []byte(content)); err != nil {
-			return fmt.Errorf("write file failed: %w", err)
-		}
-	}
-	return nil
-}
-
 // WriteTempFile writes data to a temp file and returns its name.
 func WriteTempFile(data []byte) (string, error) {
 	// Note: pkg/report knows about "syzkaller" prefix as it appears in crashes as process name.
@@ -82,29 +64,4 @@ func WriteTempFile(data []byte) (string, error) {
 	}
 	f.Close()
 	return f.Name(), nil
-}
-
-// GrepFiles returns the list of files (relative to root) that include target.
-// If ext is not empty, the files will be filtered by the extension.
-// The function assumes that the files are not too big and may fit in memory.
-func GrepFiles(root, ext string, target []byte) ([]string, error) {
-	var ret []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || filepath.Ext(path) != ext {
-			return nil
-		}
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("failed to open %s: %w", path, err)
-		}
-		if bytes.Contains(content, target) {
-			rel, _ := filepath.Rel(root, path)
-			ret = append(ret, rel)
-		}
-		return nil
-	})
-	return ret, err
 }

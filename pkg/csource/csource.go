@@ -74,17 +74,13 @@ func generateSandboxFunctionSignature(sandboxName string, sandboxArg int) string
 
 func (ctx *context) generateSource() ([]byte, error) {
 	ctx.filterCalls()
-	calls, vars, err := ctx.generateProgCalls(ctx.p, ctx.opts.Trace, ctx.opts.CallComments)
+	calls, vars, err := ctx.generateProgCalls(ctx.p, ctx.opts.Trace)
 	if err != nil {
 		return nil, err
 	}
 
 	mmapProg := ctx.p.Target.DataMmapProg()
-	// Disable comments on the mmap calls as they are part of the initial setup
-	// for a program and always very similar. Comments on these provide
-	// little-to-no additional context that can't be inferred from looking at
-	// the call arguments directly, and just make the source longer.
-	mmapCalls, _, err := ctx.generateProgCalls(mmapProg, false, false)
+	mmapCalls, _, err := ctx.generateProgCalls(mmapProg, false)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +202,7 @@ func (ctx *context) generateSyscalls(calls []string, hasVars bool) string {
 		fmt.Fprintf(buf, "\tswitch (call) {\n")
 		for i, c := range calls {
 			fmt.Fprintf(buf, "\tcase %v:\n", i)
-			fmt.Fprintf(buf, "%s", strings.ReplaceAll(c, "\t", "\t\t"))
+			fmt.Fprintf(buf, "%s", strings.Replace(c, "\t", "\t\t", -1))
 			fmt.Fprintf(buf, "\t\tbreak;\n")
 		}
 		fmt.Fprintf(buf, "\t}\n")
@@ -240,47 +236,7 @@ func (ctx *context) generateSyscallDefines() string {
 	return buf.String()
 }
 
-const indent string = "  " // Two spaces.
-// clang-format produces nicer comments with '//' prefixing versus '/* ... */' style comments.
-const commentPrefix string = "//"
-
-func linesToCStyleComment(lines []string) string {
-	var commentBuilder strings.Builder
-	for i, line := range lines {
-		commentBuilder.WriteString(commentPrefix + indent + line)
-		if i != len(lines)-1 {
-			commentBuilder.WriteString("\n")
-		}
-	}
-	return commentBuilder.String()
-}
-
-func generateComment(call *prog.Call) string {
-	lines := []string{fmt.Sprintf("%s arguments: [", call.Meta.Name)}
-	for i, arg := range call.Args {
-		argLines := prog.FormatArg(arg, call.Meta.Args[i].Name)
-		// Indent the formatted argument.
-		for i := range argLines {
-			argLines[i] = indent + argLines[i]
-		}
-		lines = append(lines, argLines...)
-	}
-	lines = append(lines, "]")
-	if call.Ret != nil {
-		lines = append(lines, "returns "+call.Ret.Type().Name())
-	}
-	return linesToCStyleComment(lines)
-}
-
-func (ctx *context) generateProgCalls(p *prog.Prog, trace, addComments bool) ([]string, []uint64, error) {
-	var comments []string
-	if addComments {
-		comments = make([]string, len(p.Calls))
-		for i, call := range p.Calls {
-			comments[i] = generateComment(call)
-		}
-	}
-
+func (ctx *context) generateProgCalls(p *prog.Prog, trace bool) ([]string, []uint64, error) {
 	exec, err := p.SerializeForExec()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to serialize program: %w", err)
@@ -289,19 +245,15 @@ func (ctx *context) generateProgCalls(p *prog.Prog, trace, addComments bool) ([]
 	if err != nil {
 		return nil, nil, err
 	}
-	calls, vars := ctx.generateCalls(decoded, trace, addComments, comments)
+	calls, vars := ctx.generateCalls(decoded, trace)
 	return calls, vars, nil
 }
 
-func (ctx *context) generateCalls(p prog.ExecProg, trace, addComments bool,
-	callComments []string) ([]string, []uint64) {
+func (ctx *context) generateCalls(p prog.ExecProg, trace bool) ([]string, []uint64) {
 	var calls []string
 	csumSeq := 0
 	for ci, call := range p.Calls {
 		w := new(bytes.Buffer)
-		if addComments {
-			w.WriteString(callComments[ci] + "\n")
-		}
 		// Copyin.
 		for _, copyin := range call.Copyin {
 			ctx.copyin(w, &csumSeq, copyin)
@@ -402,7 +354,8 @@ func (ctx *context) fmtCallBody(call prog.ExecCall) string {
 				panic("string format in syscall argument")
 			}
 			com := ctx.argComment(call.Meta.Args[i], arg)
-			argsStrs = append(argsStrs, com+handleBigEndian(arg, ctx.constArgToStr(arg, native)))
+			suf := ctx.literalSuffix(arg, native)
+			argsStrs = append(argsStrs, com+handleBigEndian(arg, ctx.constArgToStr(arg, suf)))
 		case prog.ExecArgResult:
 			if arg.Format != prog.FormatNative && arg.Format != prog.FormatBigEndian {
 				panic("string format in syscall argument")
@@ -450,7 +403,7 @@ func (ctx *context) copyin(w *bytes.Buffer, csumSeq *int, copyin prog.ExecCopyin
 	switch arg := copyin.Arg.(type) {
 	case prog.ExecArgConst:
 		if arg.BitfieldOffset == 0 && arg.BitfieldLength == 0 {
-			ctx.copyinVal(w, copyin.Addr, arg.Size, handleBigEndian(arg, ctx.constArgToStr(arg, false)), arg.Format)
+			ctx.copyinVal(w, copyin.Addr, arg.Size, handleBigEndian(arg, ctx.constArgToStr(arg, "")), arg.Format)
 		} else {
 			if arg.Format != prog.FormatNative && arg.Format != prog.FormatBigEndian {
 				panic("bitfield+string format")
@@ -464,7 +417,7 @@ func (ctx *context) copyin(w *bytes.Buffer, csumSeq *int, copyin prog.ExecCopyin
 				bitfieldOffset = arg.Size*8 - arg.BitfieldOffset - arg.BitfieldLength
 			}
 			fmt.Fprintf(w, "\tNONFAILING(STORE_BY_BITMASK(uint%v, %v, 0x%x, %v, %v, %v));\n",
-				arg.Size*8, htobe, copyin.Addr, ctx.constArgToStr(arg, false),
+				arg.Size*8, htobe, copyin.Addr, ctx.constArgToStr(arg, ""),
 				bitfieldOffset, arg.BitfieldLength)
 		}
 	case prog.ExecArgResult:
@@ -597,21 +550,12 @@ func (ctx *context) argComment(field prog.Field, arg prog.ExecArg) string {
 	return "/*" + field.Name + "=" + val + "*/"
 }
 
-// enforceBitSize is necessary e.g. in the variadic arguments context of the syscall() function.
-func (ctx *context) constArgToStr(arg prog.ExecArgConst, enforceBitSize bool) string {
-	suffix := ""
-	if enforceBitSize {
-		suffix = ctx.literalSuffix(arg)
-	}
+func (ctx *context) constArgToStr(arg prog.ExecArgConst, suffix string) string {
 	mask := (uint64(1) << (arg.Size * 8)) - 1
 	v := arg.Value & mask
 	val := ""
 	if v == ^uint64(0)&mask {
-		if enforceBitSize {
-			val = "(intptr_t)-1"
-		} else {
-			val = "-1"
-		}
+		val = "-1"
 	} else if v >= 10 {
 		val = fmt.Sprintf("0x%x%s", v, suffix)
 	} else {
@@ -623,8 +567,8 @@ func (ctx *context) constArgToStr(arg prog.ExecArgConst, enforceBitSize bool) st
 	return val
 }
 
-func (ctx *context) literalSuffix(arg prog.ExecArgConst) string {
-	if arg.Size == 8 {
+func (ctx *context) literalSuffix(arg prog.ExecArgConst, native bool) string {
+	if native && arg.Size == 8 {
 		// syscall() is variadic, so constant arguments must be explicitly
 		// promoted. Otherwise the compiler is free to leave garbage in the
 		// upper 32 bits of the argument value. In practice this can happen
@@ -675,18 +619,15 @@ func (ctx *context) postProcess(result []byte) []byte {
 	if !ctx.opts.HandleSegv {
 		result = regexp.MustCompile(`\t*NONFAILING\((.*)\);\n`).ReplaceAll(result, []byte("$1;\n"))
 	}
-	result = bytes.ReplaceAll(result, []byte("NORETURN"), nil)
-	result = bytes.ReplaceAll(result, []byte("doexit("), []byte("exit("))
+	result = bytes.Replace(result, []byte("NORETURN"), nil, -1)
+	result = bytes.Replace(result, []byte("doexit("), []byte("exit("), -1)
 	// TODO: Figure out what would be the right replacement for doexit_thread().
-	result = bytes.ReplaceAll(result, []byte("doexit_thread("), []byte("exit("))
+	result = bytes.Replace(result, []byte("doexit_thread("), []byte("exit("), -1)
 	result = regexp.MustCompile(`PRINTF\(.*?\)`).ReplaceAll(result, nil)
 	result = regexp.MustCompile(`\t*debug\((.*\n)*?.*\);\n`).ReplaceAll(result, nil)
 	result = regexp.MustCompile(`\t*debug_dump_data\((.*\n)*?.*\);\n`).ReplaceAll(result, nil)
 	result = regexp.MustCompile(`\t*exitf\((.*\n)*?.*\);\n`).ReplaceAll(result, []byte("\texit(1);\n"))
 	result = regexp.MustCompile(`\t*fail(msg)?\((.*\n)*?.*\);\n`).ReplaceAll(result, []byte("\texit(1);\n"))
-
-	// Remove executor include guards.
-	result = regexp.MustCompile(`#define\s+[A-Z0-9_]*_H\s*\n`).ReplaceAll(result, nil)
 
 	result = ctx.hoistIncludes(result)
 	result = ctx.removeEmptyLines(result)
@@ -734,9 +675,9 @@ func (ctx *context) hoistIncludes(result []byte) []byte {
 // removeEmptyLines removes duplicate new lines.
 func (ctx *context) removeEmptyLines(result []byte) []byte {
 	for {
-		newResult := bytes.ReplaceAll(result, []byte{'\n', '\n', '\n'}, []byte{'\n', '\n'})
-		newResult = bytes.ReplaceAll(newResult, []byte{'\n', '\n', '\t'}, []byte{'\n', '\t'})
-		newResult = bytes.ReplaceAll(newResult, []byte{'\n', '\n', ' '}, []byte{'\n', ' '})
+		newResult := bytes.Replace(result, []byte{'\n', '\n', '\n'}, []byte{'\n', '\n'}, -1)
+		newResult = bytes.Replace(newResult, []byte{'\n', '\n', '\t'}, []byte{'\n', '\t'}, -1)
+		newResult = bytes.Replace(newResult, []byte{'\n', '\n', ' '}, []byte{'\n', ' '}, -1)
 		if len(newResult) == len(result) {
 			return result
 		}

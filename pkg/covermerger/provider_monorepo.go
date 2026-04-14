@@ -3,6 +3,8 @@
 
 package covermerger
 
+//go:generate ../../tools/mockery.sh --name FileVersProvider -r
+
 import (
 	"fmt"
 	"path/filepath"

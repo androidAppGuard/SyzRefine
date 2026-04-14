@@ -31,7 +31,7 @@ func RunStrace(result *Result, cfg *mgrconfig.Config, reporter *report.Reporter,
 	}
 	var runRes *instance.RunResult
 	var err error
-	runErr := pool.Run(context.Background(), func(ctx context.Context, inst *vm.Instance, updInfo dispatcher.UpdateInfo) {
+	pool.Run(func(ctx context.Context, inst *vm.Instance, updInfo dispatcher.UpdateInfo) {
 		updInfo(func(info *dispatcher.Info) {
 			info.Status = "running strace"
 		})
@@ -58,9 +58,7 @@ func RunStrace(result *Result, cfg *mgrconfig.Config, reporter *report.Reporter,
 			runRes, err = ret.RunSyzProg(params)
 		}
 	})
-	if runErr != nil {
-		return straceFailed(runErr)
-	} else if err != nil {
+	if err != nil {
 		return straceFailed(err)
 	}
 	return &StraceResult{

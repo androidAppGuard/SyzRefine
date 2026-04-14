@@ -1,5 +1,4 @@
 TITLE: panic: vop_generic_badop
-TYPE: DoS
 SUPPRESSED: Y
 
 panic: vop_generic_badop

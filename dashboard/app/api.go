@@ -14,7 +14,6 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
-	"net/mail"
 	"net/url"
 	"reflect"
 	"regexp"
@@ -37,7 +36,6 @@ import (
 	"google.golang.org/appengine/v2"
 	db "google.golang.org/appengine/v2/datastore"
 	"google.golang.org/appengine/v2/log"
-	aemail "google.golang.org/appengine/v2/mail"
 	"google.golang.org/appengine/v2/user"
 )
 
@@ -59,7 +57,6 @@ var apiHandlers = map[string]APIHandler{
 	"load_full_bug":         apiLoadFullBug,
 	"save_discussion":       apiSaveDiscussion,
 	"create_upload_url":     apiCreateUploadURL,
-	"send_email":            apiSendEmail,
 	"save_coverage":         gcsPayloadHandler(apiSaveCoverage),
 	"upload_build":          nsHandler(apiUploadBuild),
 	"builder_poll":          nsHandler(apiBuilderPoll),
@@ -107,6 +104,7 @@ var maxCrashes = func() int {
 func handleJSON(fn JSONHandler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c := appengine.NewContext(r)
+		c = SetCoverageDBClient(c, coverageDBClient)
 		reply, err := fn(c, r)
 		if err != nil {
 			status := logErrorPrepareStatus(c, err)
@@ -190,9 +188,13 @@ func gcsPayloadHandler(handler APIHandler) APIHandler {
 			return nil, fmt.Errorf("gcs.NewClient: %w", err)
 		}
 		defer clientGCS.Close()
-		gcsPayloadReader, err := clientGCS.FileReader(gcsURL)
+		gcsFile, err := clientGCS.Read(gcsURL)
 		if err != nil {
-			return nil, fmt.Errorf("clientGCS.FileReader: %w", err)
+			return nil, fmt.Errorf("clientGCS.Read: %w", err)
+		}
+		gcsPayloadReader, err := gcsFile.Reader()
+		if err != nil {
+			return nil, fmt.Errorf("gcsFile.Reader: %w", err)
 		}
 		gz, err := gzip.NewReader(gcsPayloadReader)
 		if err != nil {
@@ -876,13 +878,10 @@ func reportCrash(c context.Context, build *Build, req *dashapi.Crash) (*Bug, err
 		log.Infof(c, "not saving crash for %q", bug.Title)
 	}
 
-	subsystemService := getNsConfig(c, ns).Subsystems.Service
-
 	newSubsystems := []*subsystem.Subsystem{}
 	// Recalculate subsystems on the first saved crash and on the first saved repro,
 	// unless a user has already manually specified them.
-	calculateSubsystems := subsystemService != nil &&
-		save &&
+	calculateSubsystems := save &&
 		!bug.hasUserSubsystems() &&
 		(bug.NumCrashes == 0 ||
 			bug.ReproLevel == ReproLevelNone && reproLevel != ReproLevelNone)
@@ -913,7 +912,7 @@ func reportCrash(c context.Context, build *Build, req *dashapi.Crash) (*Bug, err
 			bug.HasReport = true
 		}
 		if calculateSubsystems {
-			bug.SetAutoSubsystems(c, newSubsystems, now, subsystemService.Revision)
+			bug.SetAutoSubsystems(c, newSubsystems, now, getNsConfig(c, ns).Subsystems.Revision)
 		}
 		bug.increaseCrashStats(now)
 		bug.HappenedOn = mergeString(bug.HappenedOn, build.Manager)
@@ -1935,25 +1934,6 @@ func apiCreateUploadURL(c context.Context, payload io.Reader) (interface{}, erro
 	return fmt.Sprintf("%s/%s.upload", bucket, uuid.New().String()), nil
 }
 
-func apiSendEmail(c context.Context, payload io.Reader) (interface{}, error) {
-	req := new(dashapi.SendEmailReq)
-	if err := json.NewDecoder(payload).Decode(req); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal request: %w", err)
-	}
-	var headers mail.Header
-	if req.InReplyTo != "" {
-		headers = mail.Header{"In-Reply-To": []string{req.InReplyTo}}
-	}
-	return nil, sendEmail(c, &aemail.Message{
-		Sender:  req.Sender,
-		Headers: headers,
-		To:      req.To,
-		Cc:      req.Cc,
-		Subject: req.Subject,
-		Body:    req.Body,
-	})
-}
-
 // apiSaveCoverage reads jsonl data from payload and stores it to coveragedb.
 // First payload jsonl line is a coveragedb.HistoryRecord (w/o session and time).
 // Second+ records are coveragedb.JSONLWrapper.
@@ -1963,7 +1943,12 @@ func apiSaveCoverage(c context.Context, payload io.Reader) (interface{}, error) 
 	if err := jsonDec.Decode(descr); err != nil {
 		return 0, fmt.Errorf("json.NewDecoder(coveragedb.HistoryRecord).Decode: %w", err)
 	}
-	rowsCreated, err := coveragedb.SaveMergeResult(c, getCoverageDBClient(c), descr, jsonDec)
+	var sss []*subsystem.Subsystem
+	if service := getNsConfig(c, descr.Namespace).Subsystems.Service; service != nil {
+		sss = service.List()
+		log.Infof(c, "found %d subsystems for %s namespace", len(sss), descr.Namespace)
+	}
+	rowsCreated, err := coveragedb.SaveMergeResult(c, GetCoverageDBClient(c), descr, jsonDec, sss)
 	if err != nil {
 		log.Errorf(c, "error storing coverage for ns %s, date %s: %v",
 			descr.Namespace, descr.DateTo.String(), err)

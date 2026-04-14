@@ -33,9 +33,6 @@ type Result struct {
 	// Information about the final (non-symbolized) crash that we reproduced.
 	// Can be different from what we started reproducing.
 	Report *report.Report
-	// A very rough estimate of the probability with which the resulting syz
-	// reproducer crashes the kernel.
-	Reliability float64
 }
 
 type Stats struct {
@@ -81,12 +78,10 @@ type Environment struct {
 	// The Fast repro mode restricts the repro log bisection,
 	// it skips multiple simpifications and C repro generation.
 	Fast bool
-
-	logf func(string, ...interface{})
 }
 
 func Run(ctx context.Context, log []byte, env Environment) (*Result, *Stats, error) {
-	return runInner(ctx, log, env, &poolWrapper{
+	return runInner(ctx, log, env.Config, env.Features, env.Reporter, env.Fast, &poolWrapper{
 		cfg:      env.Config,
 		reporter: env.Reporter,
 		pool:     env.Pool,
@@ -95,8 +90,8 @@ func Run(ctx context.Context, log []byte, env Environment) (*Result, *Stats, err
 
 var ErrEmptyCrashLog = errors.New("no programs")
 
-func runInner(ctx context.Context, crashLog []byte, env Environment, exec execInterface) (*Result, *Stats, error) {
-	cfg := env.Config
+func runInner(ctx context.Context, crashLog []byte, cfg *mgrconfig.Config, features flatrpc.Feature,
+	reporter *report.Reporter, fast bool, exec execInterface) (*Result, *Stats, error) {
 	entries := cfg.Target.ParseLog(crashLog, prog.NonStrict)
 	if len(entries) == 0 {
 		return nil, nil, fmt.Errorf("log (%d bytes) parse failed: %w", len(crashLog), ErrEmptyCrashLog)
@@ -104,7 +99,7 @@ func runInner(ctx context.Context, crashLog []byte, env Environment, exec execIn
 	crashStart := len(crashLog)
 	crashTitle, crashType := "", crash.UnknownType
 	var crashExecutor *report.ExecutorInfo
-	if rep := env.Reporter.Parse(crashLog); rep != nil {
+	if rep := reporter.Parse(crashLog); rep != nil {
 		crashStart = rep.StartPos
 		crashTitle = rep.Title
 		crashType = rep.Type
@@ -129,7 +124,7 @@ func runInner(ctx context.Context, crashLog []byte, env Environment, exec execIn
 	case crashType == crash.Hang:
 		testTimeouts = testTimeouts[2:]
 	}
-	if env.Fast {
+	if fast {
 		testTimeouts = []time.Duration{30 * time.Second, 5 * time.Minute}
 	}
 	reproCtx := &reproContext{
@@ -143,12 +138,11 @@ func runInner(ctx context.Context, crashLog []byte, env Environment, exec execIn
 
 		entries:        entries,
 		testTimeouts:   testTimeouts,
-		startOpts:      createStartOptions(cfg, env.Features, crashType),
+		startOpts:      createStartOptions(cfg, features, crashType),
 		stats:          new(Stats),
 		timeouts:       cfg.Timeouts,
 		observedTitles: map[string]bool{},
-		fast:           env.Fast,
-		logf:           env.logf,
+		fast:           fast,
 	}
 	return reproCtx.run()
 }
@@ -266,47 +260,7 @@ func (ctx *reproContext) repro() (*Result, error) {
 			}
 		}
 	}
-	// Validate the resulting reproducer - a random rare kernel crash might have diverted the process.
-	res.Reliability, err = calculateReliability(func() (bool, error) {
-		ret, err := ctx.testProg(res.Prog, res.Duration, res.Opts, false)
-		if err != nil {
-			return false, err
-		}
-		ctx.reproLogf(2, "validation run: crashed=%v", ret.Crashed)
-		return ret.Crashed, nil
-	})
-	if err != nil {
-		ctx.reproLogf(2, "could not calculate reliability, err=%v", err)
-		return nil, err
-	}
-
-	const minReliability = 0.15
-	if res.Reliability < minReliability {
-		ctx.reproLogf(1, "reproducer is too unreliable: %.2f", res.Reliability)
-		return nil, err
-	}
-
 	return res, nil
-}
-
-func calculateReliability(cb func() (bool, error)) (float64, error) {
-	const (
-		maxRuns  = 10
-		enoughOK = 3
-	)
-	total := 0
-	okCount := 0
-	for i := 0; i < maxRuns && okCount < enoughOK; i++ {
-		total++
-		ok, err := cb()
-		if err != nil {
-			return 0, err
-		}
-		if ok {
-			okCount++
-		}
-	}
-	return float64(okCount) / float64(total), nil
 }
 
 func (ctx *reproContext) extractProg(entries []*prog.LogEntry) (*Result, error) {
@@ -462,14 +416,10 @@ func (ctx *reproContext) concatenateProgs(entries []*prog.LogEntry, dur time.Dur
 		// There's a risk of exceeding prog.MaxCalls, so let's first minimize
 		// all entries separately.
 		for i := 0; i < len(entries); i++ {
-			var testErr error
 			ctx.reproLogf(2, "minimizing program #%d before concatenation", i)
 			callsBefore := len(entries[i].P.Calls)
 			entries[i].P, _ = prog.Minimize(entries[i].P, -1, prog.MinimizeCallsOnly,
 				func(p1 *prog.Prog, _ int) bool {
-					if testErr != nil {
-						return false
-					}
 					var newEntries []*prog.LogEntry
 					if i > 0 {
 						newEntries = append(newEntries, entries[:i]...)
@@ -482,15 +432,11 @@ func (ctx *reproContext) concatenateProgs(entries []*prog.LogEntry, dur time.Dur
 					}
 					ret, err := ctx.testProgs(newEntries, dur, ctx.startOpts, false)
 					if err != nil {
-						testErr = err
 						ctx.reproLogf(0, "concatenation step failed with %v", err)
 						return false
 					}
 					return ret.Crashed
 				})
-			if testErr != nil {
-				return nil, testErr
-			}
 			ctx.reproLogf(2, "minimized %d calls -> %d calls", callsBefore, len(entries[i].P.Calls))
 		}
 	}
@@ -534,11 +480,7 @@ func (ctx *reproContext) minimizeProg(res *Result) (*Result, error) {
 	if ctx.fast {
 		mode = prog.MinimizeCallsOnly
 	}
-	var testErr error
 	res.Prog, _ = prog.Minimize(res.Prog, -1, mode, func(p1 *prog.Prog, callIndex int) bool {
-		if testErr != nil {
-			return false
-		}
 		if len(p1.Calls) == 0 {
 			// We do want to keep at least one call, otherwise tools/syz-execprog
 			// will immediately exit.
@@ -547,14 +489,11 @@ func (ctx *reproContext) minimizeProg(res *Result) (*Result, error) {
 		ret, err := ctx.testProg(p1, res.Duration, res.Opts, false)
 		if err != nil {
 			ctx.reproLogf(2, "minimization failed with %v", err)
-			testErr = err
 			return false
 		}
 		return ret.Crashed
 	})
-	if testErr != nil {
-		return res, nil
-	}
+
 	return res, nil
 }
 
@@ -828,7 +767,7 @@ func (pw *poolWrapper) Run(ctx context.Context, params instance.ExecParams,
 
 	var result *instance.RunResult
 	var err error
-	runErr := pw.pool.Run(ctx, func(ctx context.Context, inst *vm.Instance, updInfo dispatcher.UpdateInfo) {
+	pw.pool.Run(func(ctx context.Context, inst *vm.Instance, updInfo dispatcher.UpdateInfo) {
 		updInfo(func(info *dispatcher.Info) {
 			typ := "syz"
 			if params.CProg != nil {
@@ -848,9 +787,6 @@ func (pw *poolWrapper) Run(ctx context.Context, params instance.ExecParams,
 			result, err = ret.RunSyzProg(params)
 		}
 	})
-	if runErr != nil {
-		return nil, runErr
-	}
 	return result, err
 }
 
@@ -1034,16 +970,4 @@ func (stats *Stats) FullLog() []byte {
 		"Simplifying prog options: %v\nExtracting C: %v\nSimplifying C: %v\n\n\n%s",
 		stats.ExtractProgTime, stats.MinimizeProgTime,
 		stats.SimplifyProgTime, stats.ExtractCTime, stats.SimplifyCTime, stats.Log))
-}
-
-func (repro *Result) CProgram() ([]byte, error) {
-	cprog, err := csource.Write(repro.Prog, repro.Opts)
-	if err == nil {
-		formatted, err := csource.Format(cprog)
-		if err == nil {
-			return formatted, nil
-		}
-		return cprog, nil
-	}
-	return nil, err
 }

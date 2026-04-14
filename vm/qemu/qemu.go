@@ -5,9 +5,7 @@ package qemu
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -89,18 +87,20 @@ type Pool struct {
 }
 
 type instance struct {
-	index      int
-	cfg        *Config
-	target     *targets.Target
-	archConfig *archConfig
-	version    string
-	args       []string
-	image      string
-	debug      bool
-	os         string
-	workdir    string
-	vmimpl.SSHOptions
+	index       int
+	cfg         *Config
+	target      *targets.Target
+	archConfig  *archConfig
+	version     string
+	args        []string
+	image       string
+	debug       bool
+	os          string
+	workdir     string
+	sshkey      string
+	sshuser     string
 	timeouts    targets.Timeouts
+	port        int
 	monport     int
 	forwardPort int
 	mon         net.Conn
@@ -202,8 +202,8 @@ var archConfigs = map[string]*archConfig{
 	},
 	"linux/s390x": {
 		Qemu:     "qemu-system-s390x",
-		QemuArgs: "-M s390-ccw-virtio -cpu max",
-		NetDev:   "virtio-net-ccw",
+		QemuArgs: "-M s390-ccw-virtio -cpu max,zpci=on",
+		NetDev:   "virtio-net-pci",
 		RngDev:   "virtio-rng-ccw",
 		CmdLine: []string{
 			"root=/dev/vda",
@@ -325,7 +325,7 @@ func (pool *Pool) Count() int {
 	return pool.cfg.Count
 }
 
-func (pool *Pool) Create(ctx context.Context, workdir string, index int) (vmimpl.Instance, error) {
+func (pool *Pool) Create(workdir string, index int) (vmimpl.Instance, error) {
 	sshkey := pool.env.SSHKey
 	sshuser := pool.env.SSHUser
 	if pool.env.Image == "9p" {
@@ -336,22 +336,16 @@ func (pool *Pool) Create(ctx context.Context, workdir string, index int) (vmimpl
 			return nil, err
 		}
 		initFile := filepath.Join(workdir, "init.sh")
-		if err := osutil.WriteExecFile(initFile, []byte(strings.ReplaceAll(initScript, "{{KEY}}", sshkey))); err != nil {
+		if err := osutil.WriteExecFile(initFile, []byte(strings.Replace(initScript, "{{KEY}}", sshkey, -1))); err != nil {
 			return nil, fmt.Errorf("failed to create init file: %w", err)
 		}
 	}
 
 	for i := 0; ; i++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
+		// Annotation core:  start qemu instance 
 		inst, err := pool.ctor(workdir, sshkey, sshuser, index)
 		if err == nil {
 			return inst, nil
-		}
-		if errors.Is(err, vmimpl.ErrCantSSH) {
-			// It is most likely a boot crash, just return the error as is.
-			return nil, err
 		}
 		// Older qemu prints "could", newer -- "Could".
 		if i < 1000 && strings.Contains(err.Error(), "ould not set up host forwarding rule") {
@@ -363,7 +357,6 @@ func (pool *Pool) Create(ctx context.Context, workdir string, index int) (vmimpl
 		if i < 1000 && strings.Contains(err.Error(), "Address already in use") {
 			continue
 		}
-
 		return nil, err
 	}
 }
@@ -380,12 +373,8 @@ func (pool *Pool) ctor(workdir, sshkey, sshuser string, index int) (*instance, e
 		os:         pool.env.OS,
 		timeouts:   pool.env.Timeouts,
 		workdir:    workdir,
-		SSHOptions: vmimpl.SSHOptions{
-			Addr: "localhost",
-			Port: vmimpl.UnusedTCPPort(),
-			Key:  sshkey,
-			User: sshuser,
-		},
+		sshkey:     sshkey,
+		sshuser:    sshuser,
 	}
 	if pool.env.Snapshot {
 		inst.snapshot = new(snapshot)
@@ -409,6 +398,7 @@ func (pool *Pool) ctor(workdir, sshkey, sshuser string, index int) (*instance, e
 		return nil, err
 	}
 
+	// Annotation: start a qemu instance
 	if err := inst.boot(); err != nil {
 		return nil, err
 	}
@@ -441,6 +431,8 @@ func (inst *instance) Close() error {
 }
 
 func (inst *instance) boot() error {
+	// Annotation: assing an unused port
+	inst.port = vmimpl.UnusedTCPPort()
 	inst.monport = vmimpl.UnusedTCPPort()
 	args, err := inst.buildQemuArgs()
 	if err != nil {
@@ -490,8 +482,8 @@ func (inst *instance) boot() error {
 		}
 	}
 
-	if err := vmimpl.WaitForSSH(10*time.Minute*inst.timeouts.Scale, inst.SSHOptions,
-		inst.os, inst.merger.Err, false, inst.debug); err != nil {
+	if err := vmimpl.WaitForSSH(inst.debug, 10*time.Minute*inst.timeouts.Scale, "localhost",
+		inst.sshkey, inst.sshuser, inst.os, inst.port, inst.merger.Err, false); err != nil {
 		bootOutputStop <- true
 		<-bootOutputStop
 		return vmimpl.MakeBootError(err, bootOutput)
@@ -518,7 +510,7 @@ func (inst *instance) buildQemuArgs() ([]string, error) {
 	args = append(args, splitArgs(inst.cfg.QemuArgs, templateDir, inst.index)...)
 	args = append(args,
 		"-device", inst.cfg.NetDev+",netdev=net0",
-		"-netdev", fmt.Sprintf("user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:%v-:22", inst.Port),
+		"-netdev", fmt.Sprintf("user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:%v-:22", inst.port),
 	)
 	if inst.image == "9p" {
 		args = append(args,
@@ -665,8 +657,8 @@ func (inst *instance) Copy(hostSrc string) (string, error) {
 		inst.files[vmDst] = hostSrc
 	}
 
-	args := append(vmimpl.SCPArgs(inst.debug, inst.Key, inst.Port, false),
-		hostSrc, inst.User+"@localhost:"+vmDst)
+	args := append(vmimpl.SCPArgs(inst.debug, inst.sshkey, inst.port, false),
+		hostSrc, inst.sshuser+"@localhost:"+vmDst)
 	if inst.debug {
 		log.Logf(0, "running command: scp %#v", args)
 	}
@@ -677,7 +669,7 @@ func (inst *instance) Copy(hostSrc string) (string, error) {
 	return vmDst, nil
 }
 
-func (inst *instance) Run(ctx context.Context, command string) (
+func (inst *instance) Run(timeout time.Duration, stop <-chan bool, command string) (
 	<-chan []byte, <-chan error, error) {
 	rpipe, wpipe, err := osutil.LongPipe()
 	if err != nil {
@@ -685,7 +677,7 @@ func (inst *instance) Run(ctx context.Context, command string) (
 	}
 	inst.merger.Add("ssh", rpipe)
 
-	sshArgs := vmimpl.SSHArgsForward(inst.debug, inst.Key, inst.Port, inst.forwardPort, false)
+	sshArgs := vmimpl.SSHArgsForward(inst.debug, inst.sshkey, inst.port, inst.forwardPort, false)
 	args := strings.Split(command, " ")
 	if bin := filepath.Base(args[0]); inst.target.HostFuzzer && bin == "syz-execprog" {
 		// Weird mode for Fuchsia.
@@ -694,7 +686,7 @@ func (inst *instance) Run(ctx context.Context, command string) (
 		for i, arg := range args {
 			if strings.HasPrefix(arg, "-executor=") {
 				args[i] = "-executor=" + "/usr/bin/ssh " + strings.Join(sshArgs, " ") +
-					" " + inst.User + "@localhost " + arg[len("-executor="):]
+					" " + inst.sshuser + "@localhost " + arg[len("-executor="):]
 			}
 			if host := inst.files[arg]; host != "" {
 				args[i] = host
@@ -703,7 +695,7 @@ func (inst *instance) Run(ctx context.Context, command string) (
 	} else {
 		args = []string{"ssh"}
 		args = append(args, sshArgs...)
-		args = append(args, inst.User+"@localhost", "cd "+inst.targetDir()+" && "+command)
+		args = append(args, inst.sshuser+"@localhost", "cd "+inst.targetDir()+" && "+command)
 	}
 	if inst.debug {
 		log.Logf(0, "running command: %#v", args)
@@ -717,7 +709,8 @@ func (inst *instance) Run(ctx context.Context, command string) (
 		return nil, nil, err
 	}
 	wpipe.Close()
-	return vmimpl.Multiplex(ctx, cmd, inst.merger, vmimpl.MultiplexConfig{
+	return vmimpl.Multiplex(cmd, inst.merger, timeout, vmimpl.MultiplexConfig{
+		Stop:  stop,
 		Debug: inst.debug,
 		Scale: inst.timeouts.Scale,
 	})
@@ -755,7 +748,7 @@ func (inst *instance) ssh(args ...string) ([]byte, error) {
 }
 
 func (inst *instance) sshArgs(args ...string) []string {
-	sshArgs := append(vmimpl.SSHArgs(inst.debug, inst.User, inst.Port, false), inst.User+"@localhost")
+	sshArgs := append(vmimpl.SSHArgs(inst.debug, inst.sshkey, inst.port, false), inst.sshuser+"@localhost")
 	return append(sshArgs, args...)
 }
 

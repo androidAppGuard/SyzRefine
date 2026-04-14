@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -30,19 +29,13 @@ func (client Client) GetSeries(ctx context.Context, seriesID string) (*Series, e
 	return getJSON[Series](ctx, client.baseURL+"/series/"+seriesID)
 }
 
-type UploadTriageResultReq struct {
-	SkipReason string `json:"skip_reason"`
-	Log        []byte `json:"log"`
-}
-
-func (client Client) UploadTriageResult(ctx context.Context, sessionID string, req *UploadTriageResultReq) error {
-	_, err := postJSON[UploadTriageResultReq, any](ctx, client.baseURL+"/sessions/"+sessionID+"/triage_result", req)
+func (client Client) SkipSession(ctx context.Context, sessionID string, req *SkipRequest) error {
+	_, err := postJSON[SkipRequest, any](ctx, client.baseURL+"/sessions/"+sessionID+"/skip", req)
 	return err
 }
 
 type TreesResp struct {
-	Trees       []*Tree             `json:"trees"`
-	FuzzTargets []*FuzzTriageTarget `json:"fuzz_targets"`
+	Trees []*Tree `json:"trees"`
 }
 
 func (client Client) GetTrees(ctx context.Context) (*TreesResp, error) {
@@ -82,16 +75,6 @@ func (client Client) UploadTestResult(ctx context.Context, req *TestResult) erro
 	return err
 }
 
-func (client Client) UploadTestArtifacts(ctx context.Context, sessionID, testName string,
-	tarGzContent io.Reader) error {
-	v := url.Values{}
-	v.Add("session", sessionID)
-	v.Add("test", testName)
-	url := client.baseURL + "/tests/upload_artifacts?" + v.Encode()
-	_, err := postMultiPartFile[any](ctx, url, tarGzContent)
-	return err
-}
-
 func (client Client) UploadFinding(ctx context.Context, req *NewFinding) error {
 	_, err := postJSON[NewFinding, any](ctx, client.baseURL+"/findings/upload", req)
 	return err
@@ -112,24 +95,6 @@ type UploadSessionResp struct {
 
 func (client Client) UploadSession(ctx context.Context, req *NewSession) (*UploadSessionResp, error) {
 	return postJSON[NewSession, UploadSessionResp](ctx, client.baseURL+"/sessions/upload", req)
-}
-
-type BaseFindingInfo struct {
-	BuildID string `json:"buildID"`
-	Title   string `json:"title"`
-}
-
-func (client Client) UploadBaseFinding(ctx context.Context, req *BaseFindingInfo) error {
-	_, err := postJSON[BaseFindingInfo, any](ctx, client.baseURL+"/base_findings/upload", req)
-	return err
-}
-
-type BaseFindingStatus struct {
-	Observed bool `json:"observed"`
-}
-
-func (client Client) BaseFindingStatus(ctx context.Context, req *BaseFindingInfo) (*BaseFindingStatus, error) {
-	return postJSON[BaseFindingInfo, BaseFindingStatus](ctx, client.baseURL+"/base_findings/status", req)
 }
 
 const requestTimeout = time.Minute

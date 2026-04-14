@@ -5,19 +5,10 @@
 #include "include/uapi/file_operations.h"
 #include "include/uapi/unused_ioctl.h"
 
-enum {
-	FOO_IOCTL12 = _IOR('c', 12, int),
-};
-
-enum {
-	config_foo
-};
-
 static void foo_open() {}
 static void foo_read() {}
 static void foo_write() {}
 static void foo_mmap() {}
-static void foo_mmap2() {}
 
 static void foo_ioctl2(unsigned int cmd, unsigned long arg) {
 	switch (cmd) {
@@ -34,9 +25,6 @@ static void foo_ioctl(void* file, unsigned int cmd, unsigned long arg) {
 	case FOO_IOCTL3:
 	case FOO_IOCTL4:
 	case FOO_IOCTL5:
-	case FOO_IOCTL10:
-	case FOO_IOCTL11:
-	case FOO_IOCTL12:
 	}
 	foo_ioctl2(cmd, arg);
 }
@@ -46,9 +34,7 @@ const struct file_operations foo = {
 	.read = foo_read,
 	.write = foo_write,
 	.unlocked_ioctl = foo_ioctl,
-	// Such code happens after macro expansion,
-	// we want to extract the first function name.
-	.mmap = ((config_foo) ? foo_mmap : foo_mmap2),
+	.mmap = foo_mmap,
 };
 
 static void proc_open() {}

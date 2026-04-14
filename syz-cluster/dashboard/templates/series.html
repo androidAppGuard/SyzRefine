@@ -27,7 +27,7 @@
               body.html("")
               body.load(url, function(response, status, xhr){
                   if (status == "success") {
-                      body.html($('<pre></pre>').text(response))
+                      body.html("<pre>" + response + "</pre>")
                   }
                   $('#contentModal').modal('show');
               });
@@ -71,7 +71,7 @@
             <thead>
                 <tr>
                     <th>Name</th>
-                    <th>Content <a href="/series/{{.ID}}/all_patches">[All]</a></th>
+                    <th>Content</th>
                 </tr>
             </thead>
             <tbody>
@@ -94,17 +94,20 @@
                 </tr>
                 <tr>
                     <th>Status</th>
-                    <td>{{.Status}}</td>
-                </tr>
-                {{if or (not .SkipReason.IsNull) .TriageLogURI}}
-                <tr>
-                    <th>Triaged</th>
                     <td>
-                        {{if not .SkipReason.IsNull}}Skipped: {{.SkipReason.StringVal}}{{else}}OK{{end}}
-                        {{if .TriageLogURI}}
-                            <a href="/sessions/{{.ID}}/triage_log">[Log]</a>
-                        {{end}}
+                      {{if .StartedAt.IsNull}}
+                          waiting
+                      {{else if .FinishedAt.IsNull}}
+                          in progress
+                      {{else}}
+                          finished
+                      {{end}}
                     </td>
+                </tr>
+                {{if not .SkipReason.IsNull}}
+                <tr>
+                    <th>Skipped</th>
+                    <td>{{.SkipReason.StringVal}}</td>
                 </tr>
                 {{end}}
                 {{if .LogURI}}
@@ -128,15 +131,12 @@
             {{range .Tests}}
                 <tr>
                     <td>{{.TestName}}</td>
-                    <td>{{if .BaseBuild}}{{template "build_info" .BaseBuild}}{{end}}</td>
-                    <td>{{if .PatchedBuild}}{{template "build_info" .PatchedBuild}}[patched]{{end}}</td>
+                    <td>{{if .BaseBuild}}{{.BaseBuild.CommitHash}}{{end}}</td>
+                    <td>{{if .PatchedBuild}}{{.PatchedBuild.CommitHash}}[patched]{{end}}</td>
                     <th>
                         {{.Result}}
                         {{if .LogURI}}
                             <a href="/sessions/{{.SessionID}}/test_logs?name={{.TestName}}" class="modal-link-raw">[Log]</a>
-                        {{end}}
-                        {{if .ArtifactsArchiveURI}}
-                            <a href="/sessions/{{.SessionID}}/test_artifacts?name={{.TestName}}">[Artifacts]</a>
                         {{end}}
                     </th>
                 </tr>
@@ -154,11 +154,7 @@
                             {{.Title}}
                           {{end}}
                         </td>
-                        <td>
-                          {{if .LogURI}}<a href="/findings/{{.ID}}/log" class="modal-link-raw">[Log]</a>{{end}}
-                          {{if .SyzReproURI}}<a href="/findings/{{.ID}}/syz_repro" class="modal-link-raw">[Syz Repro]</a>{{end}}
-                          {{if .CReproURI}}<a href="/findings/{{.ID}}/c_repro" class="modal-link-raw">[C Repro]</a>{{end}}
-                        </td>
+                        <td><a href="/findings/{{.ID}}/log" class="modal-link-raw">[Log]</a></td>
                       </tr>
                       {{end}}
                       </tbody>

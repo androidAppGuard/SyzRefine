@@ -66,28 +66,25 @@ type SecRange struct {
 
 const LineEnd = 1 << 30
 
-func Make(cfg *mgrconfig.Config, modules []*vminfo.KernelModule) (*Impl, error) {
-	kernelDirs := cfg.KernelDirs()
-	target := cfg.SysTarget
-	moduleObj := cfg.ModuleObj
-	vm := cfg.Type
-	if kernelDirs.Obj == "" {
+func Make(target *targets.Target, vm, objDir, srcDir, buildDir string, splitBuild bool,
+	moduleObj []string, modules []*vminfo.KernelModule) (*Impl, error) {
+	if objDir == "" {
 		return nil, fmt.Errorf("kernel obj directory is not specified")
 	}
 	if target.OS == targets.Darwin {
-		return makeMachO(target, kernelDirs, moduleObj, modules)
+		return makeMachO(target, objDir, srcDir, buildDir, moduleObj, modules)
 	}
 	if vm == targets.GVisor {
-		return makeGvisor(target, kernelDirs, modules)
+		return makeGvisor(target, objDir, srcDir, buildDir, modules)
 	}
 	var delimiters []string
-	if cfg.AndroidSplitBuild {
+	if splitBuild {
 		// Path prefixes used by Android Pixel kernels. See
 		// https://source.android.com/docs/setup/build/building-pixel-kernels for more
 		// details.
 		delimiters = []string{"/aosp/", "/private/"}
 	}
-	return makeELF(target, kernelDirs, delimiters, moduleObj, modules)
+	return makeELF(target, objDir, srcDir, buildDir, delimiters, moduleObj, modules)
 }
 
 func GetPCBase(cfg *mgrconfig.Config) (uint64, error) {

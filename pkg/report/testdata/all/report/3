@@ -1,5 +1,4 @@
 TITLE: panic: first open arg is not a pointer to string const
-TYPE: DoS
 
 panic: first open arg is not a pointer to string const
 

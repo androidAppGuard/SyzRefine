@@ -17,7 +17,6 @@ import (
 	"github.com/google/syzkaller/pkg/vcs"
 	"github.com/google/syzkaller/pkg/vminfo"
 	"github.com/google/syzkaller/sys/targets"
-	"github.com/ianlancetaylor/demangle"
 )
 
 type reporterImpl interface {
@@ -74,7 +73,7 @@ type Report struct {
 	Executor *ExecutorInfo
 	// reportPrefixLen is length of additional prefix lines that we added before actual crash report.
 	reportPrefixLen int
-	// symbolized is set if the report is symbolized. It prevents double symbolization.
+	// symbolized is set if the report is symbolized.
 	symbolized bool
 }
 
@@ -83,9 +82,12 @@ type ExecutorInfo struct {
 	ExecID int // The program the syz-executor was executing.
 }
 
-func (rep *Report) String() string {
-	return fmt.Sprintf("crash: %v\n%s", rep.Title, rep.Report)
+func (r Report) String() string {
+	return fmt.Sprintf("crash: %v\n%s", r.Title, r.Report)
 }
+
+// unspecifiedType can be used to cancel oops.reportType from oopsFormat.reportType.
+const unspecifiedType = crash.Type("UNSPECIFIED")
 
 // NewReporter creates reporter for the specified OS/Type.
 func NewReporter(cfg *mgrconfig.Config) (*Reporter, error) {
@@ -115,11 +117,13 @@ func NewReporter(cfg *mgrconfig.Config) (*Reporter, error) {
 		return nil, err
 	}
 	config := &config{
-		target:        cfg.SysTarget,
-		vmType:        cfg.Type,
-		kernelDirs:    *cfg.KernelDirs(),
-		ignores:       ignores,
-		kernelModules: localModules,
+		target:         cfg.SysTarget,
+		vmType:         cfg.Type,
+		kernelSrc:      cfg.KernelSrc,
+		kernelBuildSrc: cfg.KernelBuildSrc,
+		kernelObj:      cfg.KernelObj,
+		ignores:        ignores,
+		kernelModules:  localModules,
 	}
 	rep, suppressions, err := ctor(config)
 	if err != nil {
@@ -165,11 +169,13 @@ var ctors = map[string]fn{
 }
 
 type config struct {
-	target        *targets.Target
-	vmType        string
-	kernelDirs    mgrconfig.KernelDirs
-	ignores       []*regexp.Regexp
-	kernelModules []*vminfo.KernelModule
+	target         *targets.Target
+	vmType         string
+	kernelSrc      string
+	kernelBuildSrc string
+	kernelObj      string
+	ignores        []*regexp.Regexp
+	kernelModules  []*vminfo.KernelModule
 }
 
 type fn func(cfg *config) (reporterImpl, []string, error)
@@ -235,6 +241,16 @@ func (reporter *Reporter) Symbolize(rep *Report) error {
 		rep.Suppressed = true
 	}
 	return nil
+}
+
+func setReportType(rep *Report, oops *oops, format oopsFormat) {
+	if format.reportType == unspecifiedType {
+		rep.Type = crash.UnknownType
+	} else if format.reportType != crash.UnknownType {
+		rep.Type = format.reportType
+	} else if oops.reportType != crash.UnknownType {
+		rep.Type = oops.reportType
+	}
 }
 
 func (reporter *Reporter) isInteresting(rep *Report) bool {
@@ -393,6 +409,8 @@ type oops struct {
 	header       []byte
 	formats      []oopsFormat
 	suppressions []*regexp.Regexp
+	// This reportType will be used if oopsFormat's reportType is empty.
+	reportType crash.Type
 }
 
 type oopsFormat struct {
@@ -413,6 +431,8 @@ type oopsFormat struct {
 	// present, but this format does not comply with that.
 	noStackTrace bool
 	corrupted    bool
+	// If not empty, report will have this type.
+	reportType crash.Type
 }
 
 type stackFmt struct {
@@ -433,15 +453,15 @@ type stackFmt struct {
 	extractor frameExtractor
 }
 
-type frameExtractor func(frames []string) (string, int)
+type frameExtractor func(frames []string) string
 
 var parseStackTrace *regexp.Regexp
 
 func compile(re string) *regexp.Regexp {
-	re = strings.ReplaceAll(re, "{{ADDR}}", "0x[0-9a-f]+")
-	re = strings.ReplaceAll(re, "{{PC}}", "\\[\\<?(?:0x)?[0-9a-f]+\\>?\\]")
-	re = strings.ReplaceAll(re, "{{FUNC}}", "([a-zA-Z0-9_]+)(?:\\.|\\+)")
-	re = strings.ReplaceAll(re, "{{SRC}}", "([a-zA-Z0-9-_/.]+\\.[a-z]+:[0-9]+)")
+	re = strings.Replace(re, "{{ADDR}}", "0x[0-9a-f]+", -1)
+	re = strings.Replace(re, "{{PC}}", "\\[\\<?(?:0x)?[0-9a-f]+\\>?\\]", -1)
+	re = strings.Replace(re, "{{FUNC}}", "([a-zA-Z0-9_]+)(?:\\.|\\+)", -1)
+	re = strings.Replace(re, "{{SRC}}", "([a-zA-Z0-9-_/.]+\\.[a-z]+:[0-9]+)", -1)
 	return regexp.MustCompile(re)
 }
 
@@ -501,38 +521,24 @@ func extractDescription(output []byte, oops *oops, params *stackParams) (
 				continue
 			}
 		}
-		var argPrefix []any
+		var args []interface{}
 		for i := 2; i < len(match); i += 2 {
-			argPrefix = append(argPrefix, string(output[match[i]:match[i+1]]))
+			args = append(args, string(output[match[i]:match[i+1]]))
 		}
-		var frames []extractedFrame
 		corrupted = ""
 		if f.stack != nil {
-			var ok bool
-			frames, ok = extractStackFrame(params, f.stack, output[match[0]:])
+			frames, ok := extractStackFrame(params, f.stack, output[match[0]:])
 			if !ok {
 				corrupted = corruptedNoFrames
 			}
+			for _, frame := range frames {
+				args = append(args, frame)
+			}
 		}
-		args := canonicalArgs(argPrefix, frames)
 		desc = fmt.Sprintf(f.fmt, args...)
 		for _, alt := range f.alt {
 			altTitles = append(altTitles, fmt.Sprintf(alt, args...))
 		}
-
-		// Also consider partially stripped prefixes - these will help us
-		// better deduplicate the reports.
-		argSequences := partiallyStrippedArgs(argPrefix, frames, params)
-		for _, args := range argSequences {
-			altTitle := fmt.Sprintf(f.fmt, args...)
-			if altTitle != desc {
-				altTitles = append(altTitles, altTitle)
-			}
-			for _, alt := range f.alt {
-				altTitles = append(altTitles, fmt.Sprintf(alt, args...))
-			}
-		}
-		altTitles = uniqueStrings(altTitles)
 		format = f
 	}
 	if desc == "" {
@@ -575,47 +581,21 @@ type stackParams struct {
 	stripFramePrefixes []string
 }
 
-func (sp *stackParams) stripFrames(frames []string) []string {
-	var ret []string
-	for _, origFrame := range frames {
-		// Pick the shortest one.
-		frame := origFrame
-		for _, prefix := range sp.stripFramePrefixes {
-			newFrame := strings.TrimPrefix(origFrame, prefix)
-			if len(newFrame) < len(frame) {
-				frame = newFrame
-			}
-		}
-		ret = append(ret, frame)
-	}
-	return ret
-}
-
-type extractedFrame struct {
-	canonical string
-	raw       string
-}
-
-func extractStackFrame(params *stackParams, stack *stackFmt, output []byte) ([]extractedFrame, bool) {
+func extractStackFrame(params *stackParams, stack *stackFmt, output []byte) ([]string, bool) {
 	skip := append([]string{}, params.skipPatterns...)
 	skip = append(skip, stack.skip...)
 	var skipRe *regexp.Regexp
 	if len(skip) != 0 {
 		skipRe = regexp.MustCompile(strings.Join(skip, "|"))
 	}
-	extractor := func(rawFrames []string) extractedFrame {
-		if len(rawFrames) == 0 {
-			return extractedFrame{}
+	extractor := func(frames []string) string {
+		if len(frames) == 0 {
+			return ""
 		}
-		stripped := params.stripFrames(rawFrames)
 		if stack.extractor == nil {
-			return extractedFrame{stripped[0], rawFrames[0]}
+			return frames[0]
 		}
-		frame, idx := stack.extractor(stripped)
-		if frame != "" {
-			return extractedFrame{frame, rawFrames[idx]}
-		}
-		return extractedFrame{}
+		return stack.extractor(frames)
 	}
 	frames, ok := extractStackFrameImpl(params, output, skipRe, stack.parts, extractor)
 	if ok || len(stack.parts2) == 0 {
@@ -629,21 +609,20 @@ func lines(text []byte) [][]byte {
 }
 
 func extractStackFrameImpl(params *stackParams, output []byte, skipRe *regexp.Regexp,
-	parts []*regexp.Regexp, extractor func([]string) extractedFrame) ([]extractedFrame, bool) {
+	parts []*regexp.Regexp, extractor frameExtractor) ([]string, bool) {
 	lines := lines(output)
-	var rawFrames []string
-	var results []extractedFrame
+	var frames, results []string
 	ok := true
 	numStackTraces := 0
 nextPart:
 	for partIdx := 0; ; partIdx++ {
 		if partIdx == len(parts) || parts[partIdx] == parseStackTrace && numStackTraces > 0 {
-			keyFrame := extractor(rawFrames)
-			if keyFrame.canonical == "" {
-				keyFrame, ok = extractedFrame{"corrupted", "corrupted"}, false
+			keyFrame := extractor(frames)
+			if keyFrame == "" {
+				keyFrame, ok = "corrupted", false
 			}
 			results = append(results, keyFrame)
-			rawFrames = nil
+			frames = nil
 		}
 		if partIdx == len(parts) {
 			break
@@ -665,7 +644,7 @@ nextPart:
 				if partIdx != len(parts)-1 {
 					match := parts[partIdx+1].FindSubmatch(ln)
 					if match != nil {
-						rawFrames = appendStackFrame(rawFrames, match, skipRe)
+						frames = appendStackFrame(frames, match, params, skipRe)
 						partIdx++
 						continue nextPart
 					}
@@ -677,7 +656,7 @@ nextPart:
 						break
 					}
 				}
-				rawFrames = appendStackFrame(rawFrames, match, skipRe)
+				frames = appendStackFrame(frames, match, params, skipRe)
 			}
 		} else {
 			var ln []byte
@@ -691,7 +670,7 @@ nextPart:
 				if match == nil {
 					continue
 				}
-				rawFrames = appendStackFrame(rawFrames, match, skipRe)
+				frames = appendStackFrame(frames, match, params, skipRe)
 				break
 			}
 		}
@@ -699,70 +678,20 @@ nextPart:
 	return results, ok
 }
 
-func appendStackFrame(frames []string, match [][]byte, skipRe *regexp.Regexp) []string {
+func appendStackFrame(frames []string, match [][]byte, params *stackParams, skipRe *regexp.Regexp) []string {
 	if len(match) < 2 {
 		return frames
 	}
 	for _, frame := range match[1:] {
-		if frame == nil {
-			continue
-		}
-		frame := demangle.Filter(string(frame), demangle.NoParams)
-		if skipRe == nil || !skipRe.MatchString(frame) {
-			frames = append(frames, frame)
+		if frame != nil && (skipRe == nil || !skipRe.Match(frame)) {
+			frameName := string(frame)
+			for _, prefix := range params.stripFramePrefixes {
+				frameName = strings.TrimPrefix(frameName, prefix)
+			}
+			frames = append(frames, frameName)
 		}
 	}
 	return frames
-}
-
-func canonicalArgs(prefix []any, frames []extractedFrame) []any {
-	ret := append([]any{}, prefix...)
-	for _, frame := range frames {
-		ret = append(ret, frame.canonical)
-	}
-	return ret
-}
-
-func partiallyStrippedArgs(prefix []any, frames []extractedFrame, params *stackParams) [][]any {
-	if params == nil {
-		return nil
-	}
-	ret := [][]any{}
-	for i := 0; i <= len(params.stripFramePrefixes); i++ {
-		var list []any
-		add := true
-
-		// Also include the raw frames.
-		stripPrefix := ""
-		if i > 0 {
-			stripPrefix, add = params.stripFramePrefixes[i-1], false
-		}
-		for _, frame := range frames {
-			trimmed := strings.TrimPrefix(frame.raw, stripPrefix)
-			if trimmed != frame.raw {
-				add = true
-			}
-			list = append(list, trimmed)
-		}
-		if add {
-			list = append(append([]any{}, prefix...), list...)
-			ret = append(ret, list)
-		}
-	}
-	return ret
-}
-
-func uniqueStrings(source []string) []string {
-	dup := map[string]struct{}{}
-	var ret []string
-	for _, item := range source {
-		if _, ok := dup[item]; ok {
-			continue
-		}
-		dup[item] = struct{}{}
-		ret = append(ret, item)
-	}
-	return ret
 }
 
 func simpleLineParser(output []byte, oopses []*oops, params *stackParams, ignores []*regexp.Regexp) *Report {
@@ -794,13 +723,14 @@ func simpleLineParser(output []byte, oopses []*oops, params *stackParams, ignore
 	if oops == nil {
 		return nil
 	}
-	title, corrupted, altTitles, _ := extractDescription(output[rep.StartPos:], oops, params)
+	title, corrupted, altTitles, format := extractDescription(output[rep.StartPos:], oops, params)
 	rep.Title = title
 	rep.AltTitles = altTitles
 	rep.Report = output[rep.StartPos:]
 	rep.Corrupted = corrupted != ""
 	rep.CorruptedReason = corrupted
-	rep.Type = TitleToCrashType(rep.Title)
+	setReportType(rep, oops, format)
+
 	return rep
 }
 
@@ -859,7 +789,7 @@ func Truncate(log []byte, begin, end int) []byte {
 
 var (
 	filenameRe    = regexp.MustCompile(`([a-zA-Z0-9_\-\./]*[a-zA-Z0-9_\-]+\.(c|h)):[0-9]+`)
-	reportFrameRe = regexp.MustCompile(`.* in ((?:<[a-zA-Z0-9_: ]+>)?[a-zA-Z0-9_:]+)`)
+	reportFrameRe = regexp.MustCompile(`.* in ([a-zA-Z0-9_]+)`)
 	// Matches a slash followed by at least one directory nesting before .c/.h file.
 	deeperPathRe = regexp.MustCompile(`^/[a-zA-Z0-9_\-\./]+/[a-zA-Z0-9_\-]+\.(c|h)$`)
 )
@@ -878,6 +808,7 @@ var commonOopses = []*oops{
 			},
 		},
 		[]*regexp.Regexp{},
+		crash.SyzFailure,
 	},
 	{
 		// Errors produced by log.Fatal functions.
@@ -891,6 +822,7 @@ var commonOopses = []*oops{
 			},
 		},
 		[]*regexp.Regexp{},
+		crash.SyzFailure,
 	},
 	{
 		[]byte("panic:"),
@@ -915,6 +847,7 @@ var commonOopses = []*oops{
 			compile(`ddb\.onpanic:`),
 			compile(`evtlog_status:`),
 		},
+		crash.UnknownType,
 	},
 }
 
@@ -931,30 +864,5 @@ var groupGoRuntimeErrors = oops{
 		compile("ALSA"),
 		compile("fatal error: cannot create timer"),
 	},
-}
-
-func TitleToCrashType(title string) crash.Type {
-	for _, t := range titleToType {
-		for _, prefix := range t.includePrefixes {
-			if strings.HasPrefix(title, prefix) {
-				return t.crashType
-			}
-		}
-	}
-	return crash.UnknownType
-}
-
-const reportSeparator = "\n<<<<<<<<<<<<<<< tail report >>>>>>>>>>>>>>>\n\n"
-
-func MergeReportBytes(reps []*Report) []byte {
-	var res []byte
-	for _, rep := range reps {
-		res = append(res, rep.Report...)
-		res = append(res, []byte(reportSeparator)...)
-	}
-	return res
-}
-
-func SplitReportBytes(data []byte) [][]byte {
-	return bytes.Split(data, []byte(reportSeparator))
+	crash.UnknownType,
 }

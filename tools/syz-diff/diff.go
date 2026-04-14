@@ -43,12 +43,11 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		manager.PatchFocusAreas(newCfg, [][]byte{data}, nil, nil)
+		manager.PatchFocusAreas(newCfg, [][]byte{data})
 	}
 
 	ctx := vm.ShutdownCtx()
 	err = manager.RunDiffFuzzer(ctx, baseCfg, newCfg, manager.DiffFuzzerConfig{
-		Store: &manager.DiffFuzzerStore{BasePath: newCfg.Workdir},
 		Debug: *flagDebug,
 	})
 	if err != nil {

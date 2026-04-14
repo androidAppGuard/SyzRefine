@@ -90,22 +90,20 @@ func (insn *Insn) Encode(cfg *iset.Config, r *rand.Rand) []byte {
 		for _, pref := range code {
 			switch pref {
 			case 0x66:
-				switch immSize {
-				case 4:
+				if immSize == 4 {
 					immSize1 = 2
 					operSize1 = 2
-				case 2:
+				} else if immSize == 2 {
 					immSize1 = 4
 					operSize1 = 4
 				}
 			case 0x67:
-				switch addrSize {
-				case 8:
+				if addrSize == 8 {
 					addrSize1 = 4
-				case 4:
+				} else if addrSize == 4 {
 					dispSize1 = 2
 					addrSize1 = 2
-				case 2:
+				} else if addrSize == 2 {
 					dispSize1 = 4
 					addrSize1 = 4
 				}
@@ -127,17 +125,15 @@ func (insn *Insn) Encode(cfg *iset.Config, r *rand.Rand) []byte {
 		}
 		vexB = byte(r.Intn(2))
 		W := byte(r.Intn(2))
-		switch insn.Rexw {
-		case 1:
+		if insn.Rexw == 1 {
 			W = 1
-		case -1:
+		} else if insn.Rexw == -1 {
 			W = 0
 		}
 		L := byte(r.Intn(2))
-		switch insn.VexL {
-		case 1:
+		if insn.VexL == 1 {
 			L = 1
-		case -1:
+		} else if insn.VexL == -1 {
 			L = 0
 		}
 		pp := byte(r.Intn(4))
@@ -178,12 +174,11 @@ func (insn *Insn) Encode(cfg *iset.Config, r *rand.Rand) []byte {
 		}
 
 		reg := byte(insn.Reg)
-		switch insn.Reg {
-		case -1:
+		if insn.Reg == -1 {
 			reg = byte(r.Intn(8))
-		case -6:
+		} else if insn.Reg == -6 {
 			reg = byte(r.Intn(6)) // segment register
-		case -8:
+		} else if insn.Reg == -8 {
 			if rexR {
 				reg = 0 // CR8
 			} else {
@@ -247,12 +242,11 @@ func (insn *Insn) Encode(cfg *iset.Config, r *rand.Rand) []byte {
 	}
 
 	addImm := func(imm int) {
-		switch imm {
-		case -1:
+		if imm == -1 {
 			imm = immSize
-		case -2:
+		} else if imm == -2 {
 			imm = addrSize
-		case -3:
+		} else if imm == -3 {
 			imm = operSize
 		}
 		if imm != 0 {

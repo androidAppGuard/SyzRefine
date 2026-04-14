@@ -145,8 +145,6 @@ func checkTextAccess(c context.Context, r *http.Request, tag string, id int64) (
 		// But since machine info is usually the same for all bugs and is not secret,
 		// it's fine to check based on the namespace.
 		return nil, nil, nil
-	case textFsckLog:
-		return checkCrashTextAccess(c, r, "Assets.FsckLog", id)
 	}
 }
 

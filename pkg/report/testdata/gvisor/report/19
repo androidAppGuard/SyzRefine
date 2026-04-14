@@ -1,5 +1,4 @@
 TITLE: panic: ptrace set regs failed: no such process
-TYPE: DoS
 SUPPRESSED: Y
 
 panic: ptrace set regs failed: no such process

@@ -23,14 +23,8 @@ func SleepInterruptible(d time.Duration) bool {
 	}
 }
 
-type SSHOptions struct {
-	Addr string
-	Port int
-	User string
-	Key  string
-}
-
-func WaitForSSH(timeout time.Duration, opts SSHOptions, OS string, stop chan error, systemSSHCfg, debug bool) error {
+func WaitForSSH(debug bool, timeout time.Duration, addr, sshKey, sshUser, OS string, port int, stop chan error,
+	systemSSHCfg bool) error {
 	pwd := "pwd"
 	if OS == targets.Windows {
 		pwd = "dir"
@@ -45,7 +39,7 @@ func WaitForSSH(timeout time.Duration, opts SSHOptions, OS string, stop chan err
 		case <-Shutdown:
 			return fmt.Errorf("shutdown in progress")
 		}
-		args := append(SSHArgs(debug, opts.Key, opts.Port, systemSSHCfg), opts.User+"@"+opts.Addr, pwd)
+		args := append(SSHArgs(debug, sshKey, port, systemSSHCfg), sshUser+"@"+addr, pwd)
 		if debug {
 			log.Logf(0, "running ssh: %#v", args)
 		}
@@ -57,15 +51,10 @@ func WaitForSSH(timeout time.Duration, opts SSHOptions, OS string, stop chan err
 			log.Logf(0, "ssh failed: %v", err)
 		}
 		if time.Since(startTime) > timeout {
-			return &osutil.VerboseError{
-				Err:    ErrCantSSH,
-				Output: []byte(err.Error()),
-			}
+			return &osutil.VerboseError{Title: "can't ssh into the instance", Output: []byte(err.Error())}
 		}
 	}
 }
-
-var ErrCantSSH = fmt.Errorf("can't ssh into the instance")
 
 func SSHArgs(debug bool, sshKey string, port int, systemSSHCfg bool) []string {
 	return sshArgs(debug, sshKey, "-p", port, 0, systemSSHCfg)

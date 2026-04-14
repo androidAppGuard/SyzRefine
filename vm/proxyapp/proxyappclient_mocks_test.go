@@ -3,6 +3,9 @@
 
 package proxyapp
 
+//go:generate ../../tools/mockery.sh --name subProcessCmd --exported
+//go:generate ../../tools/mockery.sh --name ProxyAppInterface -r
+
 import (
 	"context"
 	"testing"

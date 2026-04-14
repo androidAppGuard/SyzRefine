@@ -4,7 +4,6 @@
 package instance
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"time"
@@ -91,7 +90,7 @@ func SetupExecProg(vmInst *vm.Instance, mgrCfg *mgrconfig.Config, reporter *repo
 
 func CreateExecProgInstance(vmPool *vm.Pool, vmIndex int, mgrCfg *mgrconfig.Config,
 	reporter *report.Reporter, opt *OptionalConfig) (*ExecProgInstance, error) {
-	vmInst, err := vmPool.Create(context.Background(), vmIndex)
+	vmInst, err := vmPool.Create(vmIndex)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create VM: %w", err)
 	}
@@ -120,20 +119,11 @@ func (inst *ExecProgInstance) runCommand(command string, duration time.Duration,
 		command = inst.StraceBin + filterCalls + ` -s 100 -x -f ` + command
 		prefixOutput = []byte(fmt.Sprintf("%s\n\n<...>\n", command))
 	}
-	optionalBeforeContext := func(*vm.RunOptions) {}
+	opts := []any{exitCondition}
 	if inst.BeforeContextLen != 0 {
-		optionalBeforeContext = vm.WithBeforeContext(inst.BeforeContextLen)
+		opts = append(opts, vm.OutputSize(inst.BeforeContextLen))
 	}
-	ctxTimeout, cancel := context.WithTimeout(context.Background(), duration)
-	defer cancel()
-	output, reps, err := inst.VMInstance.Run(ctxTimeout, inst.reporter, command,
-		vm.WithExitCondition(exitCondition),
-		optionalBeforeContext,
-	)
-	var rep *report.Report
-	if len(reps) > 0 {
-		rep = reps[0]
-	}
+	output, rep, err := inst.VMInstance.Run(duration, inst.reporter, command, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to run command in VM: %w", err)
 	}
