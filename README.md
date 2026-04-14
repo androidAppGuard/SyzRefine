@@ -12,7 +12,7 @@
     sudo apt-get install -y make git gcc flex bison libelf-dev libssl-dev bc qemu-system-x86 build-essential debootstrap
     ```
 
-2. Install Go language support before compiling SyzMini.
+2. Install Go language support before compiling SyzRefine.
 
     ```
     wget https://dl.google.com/go/go1.22.1.linux-amd64.tar.gz
@@ -69,7 +69,7 @@
 6. Build SyzRefine
 
     ```
-    ** Clone SyzMini and compile the fuzzer. Make sure Go is installed.
+    ** Clone SyzRefine and compile the fuzzer. Make sure Go is installed.
     cd SyzRefine
     make
     ```
